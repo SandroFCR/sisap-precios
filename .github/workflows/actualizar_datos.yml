@@ -13,7 +13,10 @@ permissions:
 
 jobs:
   actualizar:
-    runs-on: ubuntu-latest
+    # runner autohospedado (en la PC de Sandro, IP residencial): el sitio de
+    # MIDAGRI bloquea las conexiones desde IPs de datacenter en la nube
+    # (probado: ubuntu-latest de GitHub daba ConnectTimeout).
+    runs-on: [self-hosted, windows, sisap]
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +34,7 @@ jobs:
         run: python -m sisap.cli construir-dwh
 
       - name: Comitear los datos actualizados
+        shell: bash  # el runner es Windows (pwsh por defecto); este script usa sintaxis bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
