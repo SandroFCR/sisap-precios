@@ -1,7 +1,11 @@
 from datetime import date
 from pathlib import Path
 
-from sisap.parser import parse_resumen_dia, parse_resumen_intervalo, parse_resumen_mensual
+from sisap.parser import (
+    parse_resumen_dia,
+    parse_resumen_intervalo,
+    parse_resumen_mensual,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

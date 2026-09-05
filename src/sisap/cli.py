@@ -2,7 +2,11 @@ import argparse
 import time
 from datetime import date, timedelta
 
-from sisap.parser import parse_resumen_dia, parse_resumen_intervalo, parse_resumen_mensual
+from sisap.parser import (
+    parse_resumen_dia,
+    parse_resumen_intervalo,
+    parse_resumen_mensual,
+)
 from sisap.scraper import (
     crear_cliente,
     fetch_resumen_dia,
@@ -24,6 +28,14 @@ PRODUCTOS_MVP = {
     "0212": "Cebolla",
     "0401": "Arroz",
     "0228": "Tomate",
+    "0105": "Yuca",
+}
+REGIONES_MVP = {
+    "150000": "Lima",
+    "040000": "Arequipa",
+    "080000": "Cusco",
+    "200000": "Piura",
+    "210000": "Puno",
 }
 VARIABLES_MVP = ["may_precio_prom", "min_precio_prom"]
 PAUSA_ENTRE_REQUESTS_SEGUNDOS = 1.5
@@ -123,6 +135,44 @@ def cmd_consultar(args: argparse.Namespace) -> None:
         print(f"  {registro.fecha}  {registro.precio}")
 
 
+def cmd_poblar_historico(args: argparse.Namespace) -> None:
+    """Puebla el historico mensual para TODOS los productos y regiones del
+    catalogo MVP, en un rango de anios (modo mensual: 1 peticion por
+    producto x region x variable, sin importar cuantos anios se pidan).
+    Pensado para correr una vez para tener una base amplia de analisis, no
+    para uso diario (para eso esta 'hoy'/'historico')."""
+    anios = list(range(args.desde_anio, args.hasta_anio + 1))
+    combinaciones = [
+        (cod_producto, cod_region, variable)
+        for cod_producto in PRODUCTOS_MVP
+        for cod_region in REGIONES_MVP
+        for variable in VARIABLES_MVP
+    ]
+    total_registros = 0
+
+    with crear_cliente() as client:
+        for i, (cod_producto, cod_region, variable) in enumerate(combinaciones, start=1):
+            nombre_region = REGIONES_MVP[cod_region]
+            html = fetch_resumen_mensual(
+                client, anios=anios, region=cod_region,
+                productos=[cod_producto], variable=variable,
+            )
+            guardar_html_crudo_mensual(
+                html, anios=anios, region=cod_region,
+                producto=cod_producto, variable=variable,
+            )
+            registros = parse_resumen_mensual(html, region=nombre_region, variable=variable)
+            guardar_registros(registros)
+            total_registros += len(registros)
+            print(
+                f"  [{i}/{len(combinaciones)}] {PRODUCTOS_MVP[cod_producto]} / "
+                f"{nombre_region} / {variable}: {len(registros)} registros"
+            )
+            time.sleep(PAUSA_ENTRE_REQUESTS_SEGUNDOS)
+
+    print(f"Total: {total_registros} registros guardados (con posibles duplicados ya filtrados)")
+
+
 def cmd_construir_dwh(_args: argparse.Namespace) -> None:
     """Reconstruye el modelo dimensional en DuckDB a partir del parquet
     historico acumulado."""
@@ -169,6 +219,14 @@ def main() -> None:
     parser_consultar.add_argument("--hasta-anio", dest="hasta_anio", type=int, required=True)
     parser_consultar.add_argument("--variable", default="may_precio_prom")
     parser_consultar.set_defaults(func=cmd_consultar)
+
+    parser_poblar = subparsers.add_parser(
+        "poblar-historico",
+        help="Puebla el historico mensual de todo el catalogo MVP (productos x regiones)",
+    )
+    parser_poblar.add_argument("--desde-anio", dest="desde_anio", type=int, required=True)
+    parser_poblar.add_argument("--hasta-anio", dest="hasta_anio", type=int, required=True)
+    parser_poblar.set_defaults(func=cmd_poblar_historico)
 
     parser_dwh = subparsers.add_parser(
         "construir-dwh", help="Reconstruye el modelo dimensional en DuckDB"

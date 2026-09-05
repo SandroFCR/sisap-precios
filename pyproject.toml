@@ -11,6 +11,8 @@ dependencies = [
     "pyarrow>=17.0",
     "tenacity>=9.0",
     "duckdb>=1.5",
+    "streamlit>=1.38",
+    "plotly>=5.24",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +24,12 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff.lint]
+# DTZ011: pedimos fechas calendario "naive" a proposito (calzan con las
+# fechas calendario, sin hora, que usa el portal de MIDAGRI) -- no es un
+# datetime con hora donde la zona horaria importaria.
+ignore = ["DTZ011"]
 
 [build-system]
 requires = ["setuptools>=68"]

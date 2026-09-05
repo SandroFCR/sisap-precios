@@ -1,0 +1,39 @@
+name: Actualizar datos SISAP
+
+"on":
+  schedule:
+    # 11:00 UTC = 06:00 en Peru (UTC-5, sin horario de verano). Una vez al dia.
+    - cron: "0 11 * * *"
+  workflow_dispatch:
+    # permite tambien correrlo a mano desde la pestaña "Actions" en GitHub,
+    # sin esperar al horario programado (util para probar)
+
+permissions:
+  contents: write  # el token por defecto es de solo lectura; hace falta esto para poder comitear
+
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar el proyecto
+        run: pip install -e .
+
+      - name: Traer los precios de hoy
+        run: python -m sisap.cli hoy
+
+      - name: Reconstruir el modelo dimensional
+        run: python -m sisap.cli construir-dwh
+
+      - name: Comitear los datos actualizados
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/processed/precios.parquet data/processed/sisap.duckdb
+          git diff --staged --quiet || git commit -m "Actualizar datos SISAP $(date -u +%Y-%m-%d)"
+          git push

@@ -4,8 +4,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
-*.duckdb
+# data/raw se queda fuera del repo: son dumps de HTML, pesados y no los
+# necesita la app publicada. data/processed SI se versiona (precios.parquet
+# y sisap.duckdb): es lo unico que Streamlit Cloud puede leer, porque solo
+# ve lo que esta en el repo, no tu disco local.
 data/raw/*
-data/processed/*
 !data/raw/.gitkeep
-!data/processed/.gitkeep
