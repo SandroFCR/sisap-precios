@@ -1,0 +1,27 @@
+[project]
+name = "sisap-precios"
+version = "0.1.0"
+description = "Pipeline de datos de precios agropecuarios (SISAP - MIDAGRI)"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28",
+    "beautifulsoup4>=4.14",
+    "pydantic>=2.13",
+    "pandas>=2.2",
+    "pyarrow>=17.0",
+    "tenacity>=9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1",
+    "pytest-cov>=4.1",
+    "ruff>=0.6",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
