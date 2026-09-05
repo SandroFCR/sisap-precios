@@ -36,7 +36,10 @@ jobs:
         run: python -m sisap.cli construir-dwh
 
       - name: Comitear los datos actualizados
-        shell: bash  # el runner es Windows (pwsh por defecto); este script usa sintaxis bash
+        # "shell: bash" a secas resuelve al bash.exe de WSL en este runner
+        # (sin distro instalada, falla) en vez del bash de Git -- apuntamos
+        # directo a la ruta de Git for Windows.
+        shell: 'C:\Program Files\Git\bin\bash.exe -e {0}'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
