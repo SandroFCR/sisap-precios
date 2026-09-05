@@ -20,9 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Verificar que Python este disponible
+        # no usamos actions/setup-python: en este runner autohospedado ya
+        # hay Python instalado, y el intento de instalar/descargar otro
+        # fallaba corriendo como el servicio de Windows
+        run: python --version
 
       - name: Instalar el proyecto
         run: pip install -e .
