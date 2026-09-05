@@ -20,6 +20,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Preferir el bash de Git al de WSL
+        # "shell: bash" resuelve por PATH, y en este runner encuentra primero
+        # C:\Windows\System32\bash.exe (el lanzador de WSL, sin distro
+        # instalada) antes que el bash real de Git for Windows. Anteponemos
+        # la carpeta de Git al PATH de los pasos siguientes para que gane.
+        run: echo "C:\Program Files\Git\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Verificar que Python este disponible
         # no usamos actions/setup-python: en este runner autohospedado ya
         # hay Python instalado, y el intento de instalar/descargar otro
@@ -36,10 +43,7 @@ jobs:
         run: python -m sisap.cli construir-dwh
 
       - name: Comitear los datos actualizados
-        # "shell: bash" a secas resuelve al bash.exe de WSL en este runner
-        # (sin distro instalada, falla) en vez del bash de Git -- apuntamos
-        # directo a la ruta de Git for Windows.
-        shell: 'C:\Program Files\Git\bin\bash.exe -e {0}'
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
