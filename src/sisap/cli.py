@@ -10,11 +10,13 @@ from sisap.scraper import (
     fetch_resumen_mensual,
 )
 from sisap.storage import (
+    PROCESSED_DIR,
     guardar_html_crudo,
     guardar_html_crudo_intervalo,
     guardar_html_crudo_mensual,
     guardar_registros,
 )
+from sisap.warehouse import construir_modelo_dimensional
 
 REGION_LIMA = "150000"
 PRODUCTOS_MVP = {
@@ -121,6 +123,15 @@ def cmd_consultar(args: argparse.Namespace) -> None:
         print(f"  {registro.fecha}  {registro.precio}")
 
 
+def cmd_construir_dwh(_args: argparse.Namespace) -> None:
+    """Reconstruye el modelo dimensional en DuckDB a partir del parquet
+    historico acumulado."""
+    ruta_parquet = PROCESSED_DIR / "precios.parquet"
+    ruta_duckdb = PROCESSED_DIR / "sisap.duckdb"
+    construir_modelo_dimensional(ruta_parquet, ruta_duckdb)
+    print(f"Modelo dimensional reconstruido en {ruta_duckdb}")
+
+
 def _dividir_por_mes(desde: date, hasta: date) -> list[tuple[date, date]]:
     """Parte un rango de fechas en trozos de ~1 mes, para no pedirle al
     servidor un rango tan grande que se demore o falle."""
@@ -158,6 +169,11 @@ def main() -> None:
     parser_consultar.add_argument("--hasta-anio", dest="hasta_anio", type=int, required=True)
     parser_consultar.add_argument("--variable", default="may_precio_prom")
     parser_consultar.set_defaults(func=cmd_consultar)
+
+    parser_dwh = subparsers.add_parser(
+        "construir-dwh", help="Reconstruye el modelo dimensional en DuckDB"
+    )
+    parser_dwh.set_defaults(func=cmd_construir_dwh)
 
     args = parser.parse_args()
     args.func(args)

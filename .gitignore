@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+*.duckdb
 data/raw/*
 data/processed/*
 !data/raw/.gitkeep

@@ -10,6 +10,7 @@ dependencies = [
     "pandas>=2.2",
     "pyarrow>=17.0",
     "tenacity>=9.0",
+    "duckdb>=1.5",
 ]
 
 [project.optional-dependencies]
