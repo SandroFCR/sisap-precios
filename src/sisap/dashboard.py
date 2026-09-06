@@ -78,7 +78,7 @@ fecha_min, fecha_max = con.execute(
 # El resto de filtros si va en un form: cambiarlos no dispara nada hasta que
 # se aprieta "Aplicar filtros" -- evita recalcular los 3 graficos con cada
 # clic suelto en un radio button o cada tecla en el rango de fechas.
-with st.sidebar.form("filtros"):
+with st.sidebar.form("form_filtros"):
     producto = st.selectbox(
         "Producto",
         con.execute(
@@ -107,14 +107,14 @@ with st.sidebar.form("filtros"):
 desde, hasta = rango if len(rango) == 2 else (fecha_min, fecha_max)
 tipo_precio = ETIQUETAS_TIPO_PRECIO[etiqueta_precio]
 
-if aplicar or "filtros" not in st.session_state:
-    st.session_state["filtros"] = {
+if aplicar or "filtros_aplicados" not in st.session_state:
+    st.session_state["filtros_aplicados"] = {
         "region": region, "producto": producto, "tipo_mercado": tipo_mercado,
         "etiqueta_precio": etiqueta_precio, "tipo_precio": tipo_precio,
         "desde": desde, "hasta": hasta,
     }
 
-filtros_aplicados = st.session_state["filtros"]
+filtros_aplicados = st.session_state["filtros_aplicados"]
 region, producto = filtros_aplicados["region"], filtros_aplicados["producto"]
 tipo_mercado = filtros_aplicados["tipo_mercado"]
 etiqueta_precio, tipo_precio = filtros_aplicados["etiqueta_precio"], filtros_aplicados["tipo_precio"]
