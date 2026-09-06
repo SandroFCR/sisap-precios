@@ -37,7 +37,10 @@ REGIONES_MVP = {
     "200000": "Piura",
     "210000": "Puno",
 }
-VARIABLES_MVP = ["may_precio_prom", "min_precio_prom"]
+VARIABLES_MVP = [
+    "may_precio_min", "may_precio_prom", "may_precio_max",
+    "min_precio_min", "min_precio_prom", "min_precio_max",
+]
 PAUSA_ENTRE_REQUESTS_SEGUNDOS = 1.5
 
 

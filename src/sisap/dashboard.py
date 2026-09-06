@@ -105,8 +105,9 @@ st.title(f"{producto} · {tipo_mercado} · {etiqueta_precio} · {region}")
 
 if df.empty:
     st.warning(
-        "No hay datos para esta combinación de filtros todavía "
-        "(el proyecto por ahora solo recolecta Lima, precio promedio)."
+        "No hay datos para esta combinación exacta de filtros. SISAP no "
+        "reporta precio minorista para todos los productos/regiones/fechas "
+        "por igual -- prueba otro producto, región o tipo de precio."
     )
     st.stop()
 
@@ -214,8 +215,8 @@ if len(comparacion) > 1:
     )
 else:
     st.info(
-        "Comparación regional: por ahora el proyecto solo recolecta Lima. "
-        "Este gráfico se activa solo cuando haya más de una región con datos."
+        "No hay suficientes regiones con dato reciente para este producto/"
+        "variable como para comparar."
     )
 
 # --- Tabla + export ---
