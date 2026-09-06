@@ -248,28 +248,61 @@ with col4, st.container(border=True):
 st.caption("🔺 rojo = el precio subió · 🟢 verde = el precio bajó, en ambos gráficos de abajo")
 
 # --- Linea: evolucion historica (correcta para series de tiempo, no barras) ---
+# Muchos productos/regiones tienen huecos grandes (meses sin ningun dato
+# reportado por SISAP). Conectar esos huecos con una curva suave da la
+# impresion falsa de una tendencia continua mes a mes. Se corta la linea
+# (insertando un punto nulo) donde el hueco entre dos datos reales es mayor
+# a 45 dias, y se muestran marcadores para que se vea cuantos puntos reales
+# hay de verdad -- ver bug real encontrado 2026-09-06 (Aceite/Amazonas: 4
+# puntos reales en 2 anios, spline los mostraba como caida continua).
+UMBRAL_HUECO_DIAS = 45
+df_linea = df[["fecha", "precio"]].copy()
+huecos = df_linea["fecha"].diff().dt.days > UMBRAL_HUECO_DIAS
+if huecos.any():
+    filas_corte = df_linea.loc[huecos].copy()
+    filas_corte["fecha"] = filas_corte["fecha"] - pd.to_timedelta(1, unit="D")
+    filas_corte["precio"] = None
+    df_linea = pd.concat([df_linea, filas_corte]).sort_values("fecha")
+
 with st.container(border=True):
     fig_linea = go.Figure()
     fig_linea.add_scatter(
-        x=df["fecha"], y=df["precio"], mode="lines",
+        x=df_linea["fecha"], y=df_linea["precio"], mode="lines+markers",
         line={"color": COLOR_SERIE, "width": 2.5, "shape": "spline", "smoothing": 0.3},
+        marker={"size": 6},
         # relleno mas visible que un wash de 10%, pero sigue siendo
         # translucido -- un bloque solido taparia la cuadricula y volveria
         # ilegible el eje Y (ver dataviz skill, "nunca un bloque saturado")
         fill="tozeroy", fillcolor=f"rgba({COLOR_SERIE_RGB},0.22)",
+        connectgaps=False,
         hovertemplate="%{x|%d %b %Y}<br>S/ %{y:.2f}<extra></extra>",
     )
     st.plotly_chart(
         _layout_base(fig_linea, "Evolución histórica", "Precio (S/ por kg)"),
         use_container_width=True,
     )
+    if huecos.any():
+        st.caption(
+            f"⚠ Hay {int(huecos.sum())} hueco(s) de más de {UMBRAL_HUECO_DIAS} días "
+            "sin dato en este rango — la línea se corta ahí en vez de dibujar una "
+            "tendencia que no existe."
+        )
 
-# --- Barras: variacion mes a mes, coloreada por si subio o bajo ---
+# --- Barras: variacion vs el ULTIMO dato real (no el mes calendario
+# anterior) -- si se resamplea a meses y se calcula pct_change antes de
+# quitar los meses vacios, un hueco hace que pandas compare contra NaN y el
+# cambio real (a veces el mas grande) desaparece en silencio. Bug real
+# encontrado 2026-09-06: el cambio de -39.75% de dic-2024 a ene-2026 no
+# aparecia porque el "mes anterior" (dic-2025) estaba vacio.
 mensual = (
     df.set_index("fecha")["precio"]
     .resample("MS").mean()
+    .dropna()
     .reset_index()
 )
+mensual["meses_desde_dato_anterior"] = (
+    mensual["fecha"].diff().dt.days / 30.4
+).round().astype("Int64")
 mensual["cambio_pct"] = mensual["precio"].pct_change() * 100
 mensual = mensual.dropna(subset=["cambio_pct"])
 # etiqueta categorica (no fecha continua): cada barra es un mes discreto, y
@@ -282,16 +315,23 @@ mensual["etiqueta"] = mensual["fecha"].apply(
 with st.container(border=True):
     if not mensual.empty:
         colores = [COLOR_MALO if v > 0 else COLOR_BUENO for v in mensual["cambio_pct"]]
+        # el texto de comparacion es honesto sobre el hueco: "vs mes anterior"
+        # si son 1-2 meses, o "vs hace N meses" si hubo un salto mas grande
+        etiqueta_comparacion = [
+            "vs. mes anterior" if n <= 2 else f"vs. hace {n} meses"
+            for n in mensual["meses_desde_dato_anterior"]
+        ]
         fig_barras = go.Figure()
         fig_barras.add_bar(
             x=mensual["etiqueta"], y=mensual["cambio_pct"],
             marker_color=colores, marker_line_width=0,
-            hovertemplate="%{x}<br>%{y:+.1f}%<extra></extra>",
+            customdata=etiqueta_comparacion,
+            hovertemplate="%{x}<br>%{y:+.1f}% %{customdata}<extra></extra>",
         )
         fig_barras.update_traces(marker={"cornerradius": 4})
         fig_barras.update_layout(bargap=0.15, xaxis={"type": "category"})
         st.plotly_chart(
-            _layout_base(fig_barras, "Variación mensual del precio", "% vs mes anterior"),
+            _layout_base(fig_barras, "Variación del precio", "% vs. dato anterior"),
             use_container_width=True,
         )
     else:
