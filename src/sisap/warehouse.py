@@ -77,18 +77,40 @@ def construir_modelo_dimensional(ruta_parquet: Path, ruta_duckdb: Path) -> None:
 
     con.execute("""
         CREATE OR REPLACE TABLE fact_precios AS
+        WITH base AS (
+            SELECT
+                p.fecha, r.region_id, pr.producto_id, v.variable_id,
+                p.unidad, p.equivalencia_kg, p.precio,
+                p.precio / p.equivalencia_kg AS precio_kg
+            FROM staging_precios p
+            JOIN dim_region r ON p.region = r.nombre_region
+            JOIN dim_producto pr ON p.producto = pr.nombre_producto
+            JOIN dim_variable v ON p.variable = v.codigo_variable
+        ),
+        con_vecinos AS (
+            SELECT *,
+                LAG(precio_kg) OVER serie AS precio_kg_anterior,
+                LEAD(precio_kg) OVER serie AS precio_kg_siguiente
+            FROM base
+            WINDOW serie AS (
+                PARTITION BY region_id, producto_id, variable_id ORDER BY fecha
+            )
+        )
         SELECT
-            p.fecha,
-            r.region_id,
-            pr.producto_id,
-            v.variable_id,
-            p.unidad,
-            p.equivalencia_kg,
-            p.precio
-        FROM staging_precios p
-        JOIN dim_region r ON p.region = r.nombre_region
-        JOIN dim_producto pr ON p.producto = pr.nombre_producto
-        JOIN dim_variable v ON p.variable = v.codigo_variable
+            fecha, region_id, producto_id, variable_id, unidad, equivalencia_kg,
+            -- outlier evidente de la fuente (ej. "1.70" en vez de "170.00"):
+            -- un mes que vale menos del 20% de AMBOS meses vecinos no es una
+            -- caida real de mercado, es un error de tipeo en SISAP. Se anula
+            -- aca (capa analitica); el valor crudo se conserva intacto en
+            -- staging_precios para auditoria.
+            CASE
+                WHEN precio_kg IS NOT NULL
+                 AND precio_kg_anterior IS NOT NULL AND precio_kg_siguiente IS NOT NULL
+                 AND precio_kg < 0.2 * LEAST(precio_kg_anterior, precio_kg_siguiente)
+                THEN NULL
+                ELSE precio
+            END AS precio
+        FROM con_vecinos
     """)
 
     _validar_integridad(con)

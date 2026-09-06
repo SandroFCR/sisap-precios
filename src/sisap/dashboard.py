@@ -12,7 +12,8 @@ RUTA_DUCKDB = Path("data/processed/sisap.duckdb")
 # algo bueno -- no es una serie mas, es un estado. Ver dataviz skill.
 COLOR_BUENO = "#0ca30c"   # el precio bajo: bueno para quien compra
 COLOR_MALO = "#d03b3b"    # el precio subio: malo para quien compra
-COLOR_SERIE = "#2a78d6"   # azul: unica serie en la linea historica, no hay "identidad" que codificar
+COLOR_SERIE = "#1baf7a"   # verde azulado (slot "aqua" ya validado en la paleta): unica serie en la linea historica, no hay "identidad" que codificar
+COLOR_SERIE_RGB = "27,175,122"
 SUPERFICIE = "#fcfcfb"
 TEXTO = "#0b0b0b"
 GRID = "#e1e0d9"
@@ -180,7 +181,7 @@ if len(df) >= 2:
 
 col1, col2, col3, col4 = st.columns(4)
 with col1, st.container(border=True):
-    st.caption(f"PRECIO ACTUAL ({df['fecha'].iloc[-1].strftime('%d/%m/%Y')})")
+    st.caption(f"PRECIO ACTUAL ({df['fecha'].iloc[-1].strftime('%d/%m/%Y')}) ⓘ", help="Último dato dentro del rango elegido")
     st.markdown(f"### S/ {precio_actual:.2f}")
     if delta_pct is not None:
         # badge de tendencia: fondo tenue + texto en color de estado + icono
@@ -197,13 +198,13 @@ with col1, st.container(border=True):
             unsafe_allow_html=True,
         )
 with col2, st.container(border=True):
-    st.caption("PROMEDIO PERIODO")
+    st.caption("PROMEDIO PERIODO ⓘ", help="Promedio de todo el rango de fechas elegido")
     st.markdown(f"### S/ {df['precio'].mean():.2f}")
 with col3, st.container(border=True):
-    st.caption("MÍNIMO PERIODO")
+    st.caption("MÍNIMO PERIODO ⓘ", help="Precio más bajo dentro del rango elegido")
     st.markdown(f"### S/ {df['precio'].min():.2f}")
 with col4, st.container(border=True):
-    st.caption("MÁXIMO PERIODO")
+    st.caption("MÁXIMO PERIODO ⓘ", help="Precio más alto dentro del rango elegido")
     st.markdown(f"### S/ {df['precio'].max():.2f}")
 
 st.caption("🔺 rojo = el precio subió · 🟢 verde = el precio bajó, en ambos gráficos de abajo")
@@ -214,7 +215,10 @@ with st.container(border=True):
     fig_linea.add_scatter(
         x=df["fecha"], y=df["precio"], mode="lines",
         line={"color": COLOR_SERIE, "width": 2.5, "shape": "spline", "smoothing": 0.3},
-        fill="tozeroy", fillcolor="rgba(42,120,214,0.10)",  # wash al 10%, nunca un bloque saturado
+        # relleno mas visible que un wash de 10%, pero sigue siendo
+        # translucido -- un bloque solido taparia la cuadricula y volveria
+        # ilegible el eje Y (ver dataviz skill, "nunca un bloque saturado")
+        fill="tozeroy", fillcolor=f"rgba({COLOR_SERIE_RGB},0.22)",
         hovertemplate="%{x|%d %b %Y}<br>S/ %{y:.2f}<extra></extra>",
     )
     st.plotly_chart(
@@ -290,12 +294,27 @@ with st.container(border=True):
             "variable como para comparar."
         )
 
-# --- Tabla + export ---
+# --- Tabla paginada + export ---
 with st.expander("DATOS CRUDOS Y EXPORTACIÓN"):
-    st.dataframe(df, use_container_width=True)
-    st.download_button(
-        "⬇ Descargar CSV",
-        df.to_csv(index=False).encode("utf-8"),
-        file_name=f"{producto}_{region}_{tipo_mercado}_{tipo_precio}.csv",
-        mime="text/csv",
-    )
+    FILAS_POR_PAGINA = 15
+    df_tabla = df.sort_values("fecha", ascending=False).reset_index(drop=True)
+    total_paginas = max(1, -(-len(df_tabla) // FILAS_POR_PAGINA))  # division hacia arriba
+
+    col_tabla, col_boton = st.columns([3, 1])
+    with col_tabla:
+        pagina = st.number_input(
+            "Página", min_value=1, max_value=total_paginas, value=1, step=1,
+            label_visibility="collapsed",
+        )
+    with col_boton:
+        st.download_button(
+            "⬇ Descargar CSV",
+            df_tabla.to_csv(index=False).encode("utf-8"),
+            file_name=f"{producto}_{region}_{tipo_mercado}_{tipo_precio}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    inicio = (pagina - 1) * FILAS_POR_PAGINA
+    st.dataframe(df_tabla.iloc[inicio : inicio + FILAS_POR_PAGINA], use_container_width=True, hide_index=True)
+    st.caption(f"Página {pagina} de {total_paginas} · {len(df_tabla)} filas en total")
