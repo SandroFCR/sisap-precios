@@ -11,15 +11,44 @@ RUTA_DUCKDB = Path("data/processed/sisap.duckdb")
 # el precio de un alimento subir SI significa algo malo y bajar significa
 # algo bueno -- no es una serie mas, es un estado. Ver dataviz skill.
 COLOR_BUENO = "#0ca30c"   # el precio bajo: bueno para quien compra
-COLOR_MALO = "#d03b3b"    # el precio subio: malo para quien compra
-COLOR_SERIE = "#1baf7a"   # verde azulado (slot "aqua" ya validado en la paleta): unica serie en la linea historica, no hay "identidad" que codificar
-COLOR_SERIE_RGB = "27,175,122"
-SUPERFICIE = "#fcfcfb"
-TEXTO = "#0b0b0b"
-GRID = "#e1e0d9"
-EJE = "#c3c2b7"
+COLOR_MALO = "#e66767"    # el precio subio: malo para quien compra (paso "critical" dark)
+COLOR_SERIE = "#22d3ee"   # cian electrico (mismo tono que primaryColor del tema oscuro)
+COLOR_SERIE_RGB = "34,211,238"
+# Superficie oscura tipo "vidrio": mas clara que el fondo de pagina para que
+# las tarjetas/graficos lean como paneles elevados, no como huecos en la pagina.
+SUPERFICIE = "#16283d"
+TEXTO = "#e8eef4"
+GRID = "#28405a"
+EJE = "#3d5770"
 
 ETIQUETAS_TIPO_PRECIO = {"Mínimo": "Minimo", "Promedio": "Promedio", "Máximo": "Maximo"}
+# Iconos por palabra clave del genero (no hay fotos con licencia por ahora,
+# ver conversacion: la galeria de fotos reales queda como tarea aparte).
+# Se busca por substring sobre el nombre de la variedad, ej. "Papa amarilla"
+# contiene "papa" -> 🥔. Orden importa poco porque los nombres no se pisan.
+ICONOS_PRODUCTO = {
+    "aceituna": "🫒", "aceite": "🫒", "aji": "🌶️", "ajo": "🧄", "arroz": "🍚",
+    "arveja": "🫛", "azucar": "🧂", "camote": "🍠", "carne": "🥩",
+    "cebolla": "🧅", "cereza": "🍒", "chirimoya": "🍈", "choclo": "🌽",
+    "fideos": "🍝", "fresa": "🍓", "frijol": "🫘", "gallo": "🐔",
+    "gallina": "🐔", "garbanzo": "🫘", "granadilla": "🍈", "haba": "🫘",
+    "harina": "🌾", "huevo": "🥚", "leche": "🥛", "lenteja": "🫘",
+    "limon": "🍋", "mandarina": "🍊", "mango": "🥭", "manzana": "🍎",
+    "melocoton": "🍑", "melon": "🍈", "naranja": "🍊", "olluco": "🥔",
+    "pallar": "🫘", "palta": "🥑", "papa": "🥔", "papaya": "🍈",
+    "pera": "🍐", "pescado": "🐟", "piña": "🍍", "platano": "🍌",
+    "quinua": "🌾", "sandia": "🍉", "tarhui": "🫘", "tomate": "🍅",
+    "uva": "🍇", "vainita": "🫛", "yuca": "🍠", "zanahoria": "🥕",
+    "zapallo": "🎃",
+}
+
+
+def _icono_producto(nombre: str) -> str:
+    nombre_normalizado = nombre.lower()
+    for clave, icono in ICONOS_PRODUCTO.items():
+        if clave in nombre_normalizado:
+            return icono
+    return "🛒"
 NOMBRES_MES_ABREV = {
     1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
     7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic",
@@ -27,16 +56,24 @@ NOMBRES_MES_ABREV = {
 
 st.set_page_config(page_title="Precios SISAP", layout="wide")
 
-# CSS minimo y no-fragil: nos apoyamos en lo que Streamlit YA hace nativo
-# (st.container(border=True) para las tarjetas, con bordes y padding propios)
-# en vez de apuntar a clases internas de Streamlit que cambian entre
-# versiones y se rompen solas en un redeploy. Esto solo ajusta el tono de
-# fondo para que las tarjetas blancas resalten un poco mas.
+# CSS: apoyado en lo que Streamlit YA hace nativo (st.container(border=True)
+# para las tarjetas) en vez de pelear con clases internas que cambian entre
+# versiones. El selector de "stVerticalBlockBorderWrapper" es el mas estable
+# que existe hoy para ese contenedor con borde; si en una version futura
+# cambia, la tarjeta sigue viendose bien igual (Streamlit ya le pone su
+# propio borde), solo se pierde el efecto vidrio esmerilado extra.
 st.markdown(
     """
     <style>
-    [data-testid="stAppViewContainer"] { background-color: #f6f7f9; }
-    [data-testid="stSidebar"] { background-color: #ffffff; }
+    [data-testid="stAppViewContainer"] { background-color: #0d1b2a; }
+    [data-testid="stSidebar"] { background-color: #0a1520; }
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        background: rgba(22, 40, 61, 0.55);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border: 1px solid rgba(34, 211, 238, 0.15);
+        border-radius: 12px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -108,6 +145,7 @@ with st.sidebar.form("form_filtros"):
             """,
             [region],
         ).df().iloc[:, 0].tolist(),
+        format_func=lambda p: f"{_icono_producto(p)} {p}",
     )
     tipo_mercado = st.radio(
         "Tipo de mercado",
@@ -152,7 +190,7 @@ df = con.execute(
     [producto, region, tipo_mercado, tipo_precio, desde, hasta],
 ).df()
 
-st.title(f"{producto} · {tipo_mercado} · {etiqueta_precio} · {region}")
+st.title(f"{_icono_producto(producto)} {producto} · {tipo_mercado} · {etiqueta_precio} · 📍 {region}")
 
 if df.empty:
     st.warning(
@@ -188,9 +226,9 @@ with col1, st.container(border=True):
         # -- nunca solo color, para que no dependa de distinguir verde de
         # rojo (ver dataviz skill, regla de status colors)
         if delta_pct > 0:
-            fondo, texto, flecha, leyenda = "#fbe9e7", COLOR_MALO, "▲", "vs. periodo anterior"
+            fondo, texto, flecha, leyenda = "rgba(230,103,103,0.15)", COLOR_MALO, "▲", "vs. periodo anterior"
         else:
-            fondo, texto, flecha, leyenda = "#e6f7e6", COLOR_BUENO, "▼", "vs. periodo anterior"
+            fondo, texto, flecha, leyenda = "rgba(12,163,12,0.15)", COLOR_BUENO, "▼", "vs. periodo anterior"
         st.markdown(
             f'<span style="background:{fondo};color:{texto};padding:3px 10px;'
             f'border-radius:12px;font-size:0.8rem;font-weight:600;">'

@@ -30,12 +30,48 @@ PRODUCTOS_MVP = {
     "0228": "Tomate",
     "0105": "Yuca",
 }
+# Catalogo completo de SISAP (51 generos), extraido del checkbox de
+# productos de la pagina. El modo mensual acepta VARIOS productos[] en una
+# sola peticion (probado: los 51 juntos = 1 request de ~8s, no 51 requests),
+# asi que poblar_historico los pide todos de una vez por region+variable.
+CATALOGO_PRODUCTOS = {
+    "1001": "Aceite", "1018": "Aceituna botija", "0202": "Aji fresco",
+    "0203": "Aji seco", "0204": "Ajo", "0401": "Arroz",
+    "0301": "Arveja grano verde", "1005": "Azucar comercial", "0101": "Camote",
+    "1101": "Carne fresca", "0212": "Cebolla", "0641": "Cerezas",
+    "0603": "Chirimoya", "0403": "Choclo", "1010": "Fideos", "0607": "Fresa",
+    "0501": "Frijol grano seco", "0302": "Frijol grano verde", "1305": "Gallo",
+    "0502": "Garbanzo grano seco", "0608": "Granadilla",
+    "0303": "Haba grano verde", "1011": "Harina", "1105": "Huevos",
+    "1104": "Leche", "0504": "Lenteja grano seco", "0611": "Limon",
+    "0614": "Mandarina", "0615": "Mango", "0617": "Manzana",
+    "0620": "Melocoton", "0619": "Melon", "0622": "Naranja", "0102": "Olluco",
+    "0506": "Pallar grano seco", "0626": "Palta", "0104": "Papa",
+    "0627": "Papaya", "0631": "Pera", "1201": "Pescado fresco/congelado",
+    "0628": "Piña", "0629": "Platano", "0405": "Quinua", "0633": "Sandia",
+    "0306": "Tarhui", "0228": "Tomate", "0637": "Uva", "0229": "Vainita",
+    "0105": "Yuca", "0230": "Zanahoria", "0231": "Zapallo",
+}
 REGIONES_MVP = {
     "150000": "Lima",
     "040000": "Arequipa",
     "080000": "Cusco",
     "200000": "Piura",
     "210000": "Puno",
+}
+# Catalogo completo de regiones de SISAP (28), incluye algunas provincias
+# reportadas aparte de su region (Andahuaylas, Chota, Jaen, Callao).
+CATALOGO_REGIONES = {
+    "010000": "Amazonas", "020000": "Ancash", "030000": "Apurimac",
+    "030201": "Andahuaylas", "040000": "Arequipa", "050000": "Ayacucho",
+    "060000": "Cajamarca", "060401": "Chota", "060801": "Jaen",
+    "070000": "Callao", "080000": "Cusco", "090000": "Huancavelica",
+    "100000": "Huanuco", "110000": "Ica", "120000": "Junin",
+    "130000": "La libertad", "140000": "Lambayeque", "150000": "Lima",
+    "160000": "Loreto", "170000": "Madre de dios", "180000": "Moquegua",
+    "190000": "Pasco", "200000": "Piura", "210000": "Puno",
+    "220000": "San martin", "230000": "Tacna", "240000": "Tumbes",
+    "250000": "Ucayali",
 }
 VARIABLES_MVP = [
     "may_precio_min", "may_precio_prom", "may_precio_max",
@@ -139,37 +175,39 @@ def cmd_consultar(args: argparse.Namespace) -> None:
 
 
 def cmd_poblar_historico(args: argparse.Namespace) -> None:
-    """Puebla el historico mensual para TODOS los productos y regiones del
-    catalogo MVP, en un rango de anios (modo mensual: 1 peticion por
-    producto x region x variable, sin importar cuantos anios se pidan).
-    Pensado para correr una vez para tener una base amplia de analisis, no
-    para uso diario (para eso esta 'hoy'/'historico')."""
+    """Puebla el historico mensual para TODO el catalogo (51 productos x 28
+    regiones) en un rango de anios. El modo mensual acepta varios
+    productos[] en una sola peticion, asi que se piden los 51 juntos: solo
+    1 peticion por region x variable (28 x 6 = 168), no por producto x
+    region x variable (que serian miles). Pensado para correr una vez para
+    tener una base amplia de analisis, no para uso diario (para eso esta
+    'hoy'/'historico')."""
     anios = list(range(args.desde_anio, args.hasta_anio + 1))
+    codigos_producto = list(CATALOGO_PRODUCTOS)
     combinaciones = [
-        (cod_producto, cod_region, variable)
-        for cod_producto in PRODUCTOS_MVP
-        for cod_region in REGIONES_MVP
+        (cod_region, variable)
+        for cod_region in CATALOGO_REGIONES
         for variable in VARIABLES_MVP
     ]
     total_registros = 0
 
     with crear_cliente() as client:
-        for i, (cod_producto, cod_region, variable) in enumerate(combinaciones, start=1):
-            nombre_region = REGIONES_MVP[cod_region]
+        for i, (cod_region, variable) in enumerate(combinaciones, start=1):
+            nombre_region = CATALOGO_REGIONES[cod_region]
             html = fetch_resumen_mensual(
                 client, anios=anios, region=cod_region,
-                productos=[cod_producto], variable=variable,
+                productos=codigos_producto, variable=variable,
             )
             guardar_html_crudo_mensual(
                 html, anios=anios, region=cod_region,
-                producto=cod_producto, variable=variable,
+                producto="todos", variable=variable,
             )
             registros = parse_resumen_mensual(html, region=nombre_region, variable=variable)
             guardar_registros(registros)
             total_registros += len(registros)
             print(
-                f"  [{i}/{len(combinaciones)}] {PRODUCTOS_MVP[cod_producto]} / "
-                f"{nombre_region} / {variable}: {len(registros)} registros"
+                f"  [{i}/{len(combinaciones)}] {nombre_region} / {variable}: "
+                f"{len(registros)} registros"
             )
             time.sleep(PAUSA_ENTRE_REQUESTS_SEGUNDOS)
 
