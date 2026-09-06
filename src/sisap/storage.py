@@ -56,6 +56,14 @@ def guardar_registros(
     else:
         df_final = df_nuevo
 
+    # A veces SISAP reporta el mismo producto/region dos veces con distinta
+    # unidad (ej. "Papa amarilla" en Puno: "Arroba" en anios viejos,
+    # "Kilogramo" desde 2026), y ambas series comparten la misma clave
+    # natural. Sin este orden, drop_duplicates(keep="last") puede quedarse
+    # con la fila vacia de una serie y borrar un precio real que si existia
+    # en la otra. Ordenar por precio (nulos primero) antes de deduplicar
+    # asegura que un valor real nunca sea tapado por uno vacio.
+    df_final = df_final.sort_values("precio", na_position="first", kind="stable")
     df_final = df_final.drop_duplicates(subset=CLAVE_NATURAL, keep="last")
     df_final.to_parquet(ruta, index=False)
     return ruta

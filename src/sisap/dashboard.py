@@ -61,29 +61,64 @@ if not RUTA_DUCKDB.exists():
 con = conectar()
 
 st.sidebar.header("Filtros")
-producto = st.sidebar.selectbox(
-    "Producto",
-    _opciones(con, "SELECT nombre_producto FROM dim_producto ORDER BY nombre_producto"),
-)
+# Región va reactiva y fuera del form (a proposito): no todas las variedades
+# de un producto existen en todas las regiones (ej. la yuca es "Yuca
+# amarilla" en Lima pero "Yuca blanca" en Arequipa), y el dropdown de
+# Producto necesita actualizarse al toque cuando cambias de region -- eso no
+# pasa si esta dentro de un form, que solo procesa cambios al enviarlo.
 region = st.sidebar.selectbox(
     "Región",
     _opciones(con, "SELECT nombre_region FROM dim_region ORDER BY nombre_region"),
 )
-tipo_mercado = st.sidebar.radio(
-    "Tipo de mercado",
-    _opciones(con, "SELECT DISTINCT tipo_mercado FROM dim_variable ORDER BY 1"),
-)
-etiqueta_precio = st.sidebar.selectbox("Tipo de precio", list(ETIQUETAS_TIPO_PRECIO))
-tipo_precio = ETIQUETAS_TIPO_PRECIO[etiqueta_precio]
 
 fecha_min, fecha_max = con.execute(
     "SELECT MIN(fecha), MAX(fecha) FROM fact_precios WHERE precio IS NOT NULL"
 ).fetchone()
-rango = st.sidebar.date_input(
-    "Rango de fechas", value=(fecha_min, fecha_max),
-    min_value=fecha_min, max_value=fecha_max,
-)
+
+# El resto de filtros si va en un form: cambiarlos no dispara nada hasta que
+# se aprieta "Aplicar filtros" -- evita recalcular los 3 graficos con cada
+# clic suelto en un radio button o cada tecla en el rango de fechas.
+with st.sidebar.form("filtros"):
+    producto = st.selectbox(
+        "Producto",
+        con.execute(
+            """
+            SELECT DISTINCT p.nombre_producto
+            FROM fact_precios f
+            JOIN dim_producto p ON f.producto_id = p.producto_id
+            JOIN dim_region r ON f.region_id = r.region_id
+            WHERE r.nombre_region = ?
+            ORDER BY 1
+            """,
+            [region],
+        ).df().iloc[:, 0].tolist(),
+    )
+    tipo_mercado = st.radio(
+        "Tipo de mercado",
+        _opciones(con, "SELECT DISTINCT tipo_mercado FROM dim_variable ORDER BY 1"),
+    )
+    etiqueta_precio = st.selectbox("Tipo de precio", list(ETIQUETAS_TIPO_PRECIO))
+    rango = st.date_input(
+        "Rango de fechas", value=(fecha_min, fecha_max),
+        min_value=fecha_min, max_value=fecha_max,
+    )
+    aplicar = st.form_submit_button("Aplicar filtros", type="primary")
+
 desde, hasta = rango if len(rango) == 2 else (fecha_min, fecha_max)
+tipo_precio = ETIQUETAS_TIPO_PRECIO[etiqueta_precio]
+
+if aplicar or "filtros" not in st.session_state:
+    st.session_state["filtros"] = {
+        "region": region, "producto": producto, "tipo_mercado": tipo_mercado,
+        "etiqueta_precio": etiqueta_precio, "tipo_precio": tipo_precio,
+        "desde": desde, "hasta": hasta,
+    }
+
+filtros_aplicados = st.session_state["filtros"]
+region, producto = filtros_aplicados["region"], filtros_aplicados["producto"]
+tipo_mercado = filtros_aplicados["tipo_mercado"]
+etiqueta_precio, tipo_precio = filtros_aplicados["etiqueta_precio"], filtros_aplicados["tipo_precio"]
+desde, hasta = filtros_aplicados["desde"], filtros_aplicados["hasta"]
 
 df = con.execute(
     """
