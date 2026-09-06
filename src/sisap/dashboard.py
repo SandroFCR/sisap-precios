@@ -26,6 +26,21 @@ NOMBRES_MES_ABREV = {
 
 st.set_page_config(page_title="Precios SISAP", layout="wide")
 
+# CSS minimo y no-fragil: nos apoyamos en lo que Streamlit YA hace nativo
+# (st.container(border=True) para las tarjetas, con bordes y padding propios)
+# en vez de apuntar a clases internas de Streamlit que cambian entre
+# versiones y se rompen solas en un redeploy. Esto solo ajusta el tono de
+# fondo para que las tarjetas blancas resalten un poco mas.
+st.markdown(
+    """
+    <style>
+    [data-testid="stAppViewContainer"] { background-color: #f6f7f9; }
+    [data-testid="stSidebar"] { background-color: #ffffff; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 @st.cache_resource
 def conectar() -> duckdb.DuckDBPyConnection:
@@ -60,7 +75,7 @@ if not RUTA_DUCKDB.exists():
 
 con = conectar()
 
-st.sidebar.header("Filtros")
+st.sidebar.markdown("##### FILTROS AVANZADOS")
 # Región va reactiva y fuera del form (a proposito): no todas las variedades
 # de un producto existen en todas las regiones (ej. la yuca es "Yuca
 # amarilla" en Lima pero "Yuca blanca" en Arequipa), y el dropdown de
@@ -164,29 +179,48 @@ if len(df) >= 2:
         delta_pct = (precio_actual - precio_anterior) / precio_anterior * 100
 
 col1, col2, col3, col4 = st.columns(4)
-col1.metric(
-    f"Precio actual ({df['fecha'].iloc[-1].strftime('%d/%m/%Y')})",
-    f"S/ {precio_actual:.2f}",
-    delta=f"{delta_pct:+.1f}%" if delta_pct is not None else None,
-    delta_color="inverse",  # para un precio, subir es la mala noticia
-)
-col2.metric("Promedio del periodo", f"S/ {df['precio'].mean():.2f}")
-col3.metric("Mínimo del periodo", f"S/ {df['precio'].min():.2f}")
-col4.metric("Máximo del periodo", f"S/ {df['precio'].max():.2f}")
+with col1, st.container(border=True):
+    st.caption(f"PRECIO ACTUAL ({df['fecha'].iloc[-1].strftime('%d/%m/%Y')})")
+    st.markdown(f"### S/ {precio_actual:.2f}")
+    if delta_pct is not None:
+        # badge de tendencia: fondo tenue + texto en color de estado + icono
+        # -- nunca solo color, para que no dependa de distinguir verde de
+        # rojo (ver dataviz skill, regla de status colors)
+        if delta_pct > 0:
+            fondo, texto, flecha, leyenda = "#fbe9e7", COLOR_MALO, "▲", "vs. periodo anterior"
+        else:
+            fondo, texto, flecha, leyenda = "#e6f7e6", COLOR_BUENO, "▼", "vs. periodo anterior"
+        st.markdown(
+            f'<span style="background:{fondo};color:{texto};padding:3px 10px;'
+            f'border-radius:12px;font-size:0.8rem;font-weight:600;">'
+            f'{flecha} {delta_pct:+.1f}% {leyenda}</span>',
+            unsafe_allow_html=True,
+        )
+with col2, st.container(border=True):
+    st.caption("PROMEDIO PERIODO")
+    st.markdown(f"### S/ {df['precio'].mean():.2f}")
+with col3, st.container(border=True):
+    st.caption("MÍNIMO PERIODO")
+    st.markdown(f"### S/ {df['precio'].min():.2f}")
+with col4, st.container(border=True):
+    st.caption("MÁXIMO PERIODO")
+    st.markdown(f"### S/ {df['precio'].max():.2f}")
 
 st.caption("🔺 rojo = el precio subió · 🟢 verde = el precio bajó, en ambos gráficos de abajo")
 
 # --- Linea: evolucion historica (correcta para series de tiempo, no barras) ---
-fig_linea = go.Figure()
-fig_linea.add_scatter(
-    x=df["fecha"], y=df["precio"], mode="lines",
-    line={"color": COLOR_SERIE, "width": 2},
-    hovertemplate="%{x|%d %b %Y}<br>S/ %{y:.2f}<extra></extra>",
-)
-st.plotly_chart(
-    _layout_base(fig_linea, "Evolución histórica", "Precio (S/ por kg)"),
-    use_container_width=True,
-)
+with st.container(border=True):
+    fig_linea = go.Figure()
+    fig_linea.add_scatter(
+        x=df["fecha"], y=df["precio"], mode="lines",
+        line={"color": COLOR_SERIE, "width": 2.5, "shape": "spline", "smoothing": 0.3},
+        fill="tozeroy", fillcolor="rgba(42,120,214,0.10)",  # wash al 10%, nunca un bloque saturado
+        hovertemplate="%{x|%d %b %Y}<br>S/ %{y:.2f}<extra></extra>",
+    )
+    st.plotly_chart(
+        _layout_base(fig_linea, "Evolución histórica", "Precio (S/ por kg)"),
+        use_container_width=True,
+    )
 
 # --- Barras: variacion mes a mes, coloreada por si subio o bajo ---
 mensual = (
@@ -203,22 +237,23 @@ mensual["etiqueta"] = mensual["fecha"].apply(
     lambda f: f"{NOMBRES_MES_ABREV[f.month]} {f.year}"
 )
 
-if not mensual.empty:
-    colores = [COLOR_MALO if v > 0 else COLOR_BUENO for v in mensual["cambio_pct"]]
-    fig_barras = go.Figure()
-    fig_barras.add_bar(
-        x=mensual["etiqueta"], y=mensual["cambio_pct"],
-        marker_color=colores, marker_line_width=0,
-        hovertemplate="%{x}<br>%{y:+.1f}%<extra></extra>",
-    )
-    fig_barras.update_traces(marker={"cornerradius": 4})
-    fig_barras.update_layout(bargap=0.15, xaxis={"type": "category"})
-    st.plotly_chart(
-        _layout_base(fig_barras, "Variación mensual del precio", "% vs mes anterior"),
-        use_container_width=True,
-    )
-else:
-    st.info("Se necesita más de un mes de datos para mostrar la variación mensual.")
+with st.container(border=True):
+    if not mensual.empty:
+        colores = [COLOR_MALO if v > 0 else COLOR_BUENO for v in mensual["cambio_pct"]]
+        fig_barras = go.Figure()
+        fig_barras.add_bar(
+            x=mensual["etiqueta"], y=mensual["cambio_pct"],
+            marker_color=colores, marker_line_width=0,
+            hovertemplate="%{x}<br>%{y:+.1f}%<extra></extra>",
+        )
+        fig_barras.update_traces(marker={"cornerradius": 4})
+        fig_barras.update_layout(bargap=0.15, xaxis={"type": "category"})
+        st.plotly_chart(
+            _layout_base(fig_barras, "Variación mensual del precio", "% vs mes anterior"),
+            use_container_width=True,
+        )
+    else:
+        st.info("Se necesita más de un mes de datos para mostrar la variación mensual.")
 
 # --- Barras: comparacion regional (mismo hue: es magnitud, no identidad) ---
 comparacion = con.execute(
@@ -236,29 +271,30 @@ comparacion = con.execute(
     [producto, tipo_mercado, tipo_precio],
 ).df()
 
-if len(comparacion) > 1:
-    fig_regiones = go.Figure()
-    fig_regiones.add_bar(
-        x=comparacion["nombre_region"], y=comparacion["precio"],
-        marker_color=COLOR_SERIE, marker_line_width=0,
-        hovertemplate="%{x}<br>S/ %{y:.2f}<extra></extra>",
-    )
-    fig_regiones.update_traces(marker={"cornerradius": 4})
-    st.plotly_chart(
-        _layout_base(fig_regiones, "Comparación entre regiones (dato más reciente)", "Precio (S/ por kg)"),
-        use_container_width=True,
-    )
-else:
-    st.info(
-        "No hay suficientes regiones con dato reciente para este producto/"
-        "variable como para comparar."
-    )
+with st.container(border=True):
+    if len(comparacion) > 1:
+        fig_regiones = go.Figure()
+        fig_regiones.add_bar(
+            x=comparacion["nombre_region"], y=comparacion["precio"],
+            marker_color=COLOR_SERIE, marker_line_width=0,
+            hovertemplate="%{x}<br>S/ %{y:.2f}<extra></extra>",
+        )
+        fig_regiones.update_traces(marker={"cornerradius": 4})
+        st.plotly_chart(
+            _layout_base(fig_regiones, "Comparación entre regiones (dato más reciente)", "Precio (S/ por kg)"),
+            use_container_width=True,
+        )
+    else:
+        st.info(
+            "No hay suficientes regiones con dato reciente para este producto/"
+            "variable como para comparar."
+        )
 
 # --- Tabla + export ---
-with st.expander("Ver datos y exportar"):
+with st.expander("DATOS CRUDOS Y EXPORTACIÓN"):
     st.dataframe(df, use_container_width=True)
     st.download_button(
-        "Descargar CSV",
+        "⬇ Descargar CSV",
         df.to_csv(index=False).encode("utf-8"),
         file_name=f"{producto}_{region}_{tipo_mercado}_{tipo_precio}.csv",
         mime="text/csv",
