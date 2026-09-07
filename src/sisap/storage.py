@@ -56,14 +56,42 @@ def guardar_registros(
     else:
         df_final = df_nuevo
 
-    # A veces SISAP reporta el mismo producto/region dos veces con distinta
-    # unidad (ej. "Papa amarilla" en Puno: "Arroba" en anios viejos,
-    # "Kilogramo" desde 2026), y ambas series comparten la misma clave
-    # natural. Sin este orden, drop_duplicates(keep="last") puede quedarse
-    # con la fila vacia de una serie y borrar un precio real que si existia
-    # en la otra. Ordenar por precio (nulos primero) antes de deduplicar
-    # asegura que un valor real nunca sea tapado por uno vacio.
-    df_final = df_final.sort_values("precio", na_position="first", kind="stable")
+    # A veces SISAP reporta el mismo producto/region/mes DOS VECES con
+    # distinta unidad al mismo tiempo (ej. Naranja washington naval/
+    # Andahuaylas ene-2023: "Kilogramo"=3.10 Y "Ciento"=3.40 juntos; Huevos
+    # rosados/Ayacucho feb-2024: "Kilogramo"=6.67 Y "Bandeja"=68.5 juntos).
+    # Como CLAVE_NATURAL no incluye la unidad, solo una de las dos filas
+    # puede sobrevivir. Bug real encontrado 2026-09-06: el orden anterior
+    # (por precio, quedandose con el numero mas alto) elegia la unidad
+    # ATIPICA cada vez que su precio crudo era numericamente mayor -- sin
+    # importar si esa unidad era la de siempre para esa serie o una
+    # aparicion aislada. El error resultante (dividir por la equivalencia_kg
+    # de la unidad atipica) a veces era sutil (~10-20%, ej. 3.8 en vez de
+    # 3.10 -- no lo bastante extremo para que la regla de outliers de
+    # warehouse.py lo detecte) y llevaba corrompiendo datos en silencio.
+    #
+    # El fix: para cada serie (region+producto+variable), calcular cual
+    # unidad es la HABITUAL (la que mas meses tiene con dato real) y, ante
+    # una colision, preferir siempre esa -- no la que tenga el precio mas
+    # alto. Con una sola lectura real (el caso original que este orden
+    # buscaba arreglar: una fila vacia vs una con dato), la unidad habitual
+    # y la unica con dato coinciden, asi que ese comportamiento no cambia.
+    grupo_serie = ["region", "producto", "variable"]
+    unidad_habitual = (
+        df_final.dropna(subset=["precio"])
+        .groupby(grupo_serie)["unidad"]
+        .agg(lambda serie: serie.value_counts().idxmax())
+    )
+    es_unidad_habitual = (
+        df_final.set_index(grupo_serie)["unidad"] == unidad_habitual.reindex(
+            df_final.set_index(grupo_serie).index
+        )
+    ).to_numpy()
+    df_final = df_final.assign(_es_unidad_habitual=es_unidad_habitual)
+    df_final = df_final.sort_values(
+        ["_es_unidad_habitual", "precio"], na_position="first", kind="stable"
+    )
     df_final = df_final.drop_duplicates(subset=CLAVE_NATURAL, keep="last")
+    df_final = df_final.drop(columns="_es_unidad_habitual")
     df_final.to_parquet(ruta, index=False)
     return ruta

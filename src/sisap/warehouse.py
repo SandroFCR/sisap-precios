@@ -90,27 +90,79 @@ def construir_modelo_dimensional(ruta_parquet: Path, ruta_duckdb: Path) -> None:
         con_vecinos AS (
             SELECT *,
                 LAG(precio_kg) OVER serie AS precio_kg_anterior,
-                LEAD(precio_kg) OVER serie AS precio_kg_siguiente
+                LEAD(precio_kg) OVER serie AS precio_kg_siguiente,
+                LAG(equivalencia_kg) OVER serie AS equiv_anterior,
+                LEAD(equivalencia_kg) OVER serie AS equiv_siguiente
             FROM base
             WINDOW serie AS (
                 PARTITION BY region_id, producto_id, variable_id ORDER BY fecha
             )
+        ),
+        evaluado AS (
+            SELECT *,
+                -- si la unidad de este mes no coincide con la de los vecinos,
+                -- probamos "que precio_kg daria si este precio se hubiera
+                -- reportado con la unidad de los vecinos". Revela si el
+                -- numero crudo ya esta en esa escala (evidencia de que el
+                -- campo UNIDAD es el error, no el precio).
+                precio / NULLIF(equiv_anterior, 0) AS precio_kg_si_fuera_unidad_vecina
+            FROM con_vecinos
         )
         SELECT
             fecha, region_id, producto_id, variable_id, unidad, equivalencia_kg,
-            -- outlier evidente de la fuente (ej. "1.70" en vez de "170.00"):
-            -- un mes que vale menos del 20% de AMBOS meses vecinos no es una
-            -- caida real de mercado, es un error de tipeo en SISAP. Se anula
-            -- aca (capa analitica); el valor crudo se conserva intacto en
-            -- staging_precios para auditoria.
+            -- Un mes se anula cuando sus dos vecinos concuerdan entre si
+            -- (dentro del 20%, señal de que representan el nivel real y no
+            -- estan en medio de su propio cambio de tendencia) Y el precio de
+            -- este mes se aleja fuerte de ese nivel (menos del 40% o mas del
+            -- 250%) bajo alguna de estas dos lecturas:
+            --   (a) typo numerico clasico: la unidad coincide con los
+            --       vecinos, pero el numero esta mal (ej. "1.70" en vez de
+            --       "170.00", Arroz extra/Arequipa nov-2024; o "49" en vez de
+            --       "149", Leche/Lima may-2026).
+            --   (b) etiqueta de unidad mal puesta: la unidad de este mes NO
+            --       coincide con los vecinos, la lectura CON SU PROPIA unidad
+            --       ya se ve tan extrema como en (a), Y ademas el precio
+            --       crudo, leido con LA UNIDAD DE LOS VECINOS, cae perfecto
+            --       dentro de lo normal -- ej. Huevos rosados/Ayacucho
+            --       mayo-2023 se reporto como "10.00" con unidad Bandeja (23
+            --       kg) en medio de un tramo en Kilogramo de ~9.3-9.5, dando
+            --       un precio/kg absurdo de 0.43; leido como Kilogramo (la
+            --       unidad real de sus vecinos) el mismo "10.00" encaja
+            --       perfecto en la tendencia. Exigir AMBAS cosas (no solo la
+            --       segunda) importa: Yuca blanca/Jaen alterna legitimamente
+            --       entre "Saco" (70 kg) y "Saco mediano" (85 kg) mes a mes,
+            --       y con cualquiera de las dos unidades el precio/kg cae
+            --       dentro del rango 0.4x-2.5x de sus vecinos (el precio
+            --       sube suave con el tiempo) -- sin el requisito de que la
+            --       PROPIA lectura sea extrema primero, esa alternancia
+            --       normal se anulaba por error.
+            --
+            --       Un primer intento de esta regla exigia la MISMA unidad
+            --       en los 3 meses para evitar falsos positivos -- pero eso
+            --       terminaba exentando exactamente el patron de arriba
+            --       (encontrado tambien en Huevos rosados/Amazonas y Haba
+            --       verde criolla/Amazonas, siempre con la misma firma: el
+            --       numero crudo no cambia, solo la unidad declarada).
+            -- Si NINGUNA de las dos lecturas calza con la tendencia, se deja
+            -- el valor tal cual: no hay base para asumir que esta mal.
+            -- El valor crudo se conserva intacto en staging_precios siempre.
             CASE
                 WHEN precio_kg IS NOT NULL
                  AND precio_kg_anterior IS NOT NULL AND precio_kg_siguiente IS NOT NULL
-                 AND precio_kg < 0.2 * LEAST(precio_kg_anterior, precio_kg_siguiente)
+                 AND equiv_anterior = equiv_siguiente
+                 AND ABS(precio_kg_anterior - precio_kg_siguiente)
+                     < 0.2 * LEAST(precio_kg_anterior, precio_kg_siguiente)
+                 AND (precio_kg < 0.4 * LEAST(precio_kg_anterior, precio_kg_siguiente)
+                      OR precio_kg > 2.5 * GREATEST(precio_kg_anterior, precio_kg_siguiente))
+                 AND (
+                     equivalencia_kg = equiv_anterior
+                     OR (precio_kg_si_fuera_unidad_vecina >= 0.4 * LEAST(precio_kg_anterior, precio_kg_siguiente)
+                         AND precio_kg_si_fuera_unidad_vecina <= 2.5 * GREATEST(precio_kg_anterior, precio_kg_siguiente))
+                 )
                 THEN NULL
                 ELSE precio
             END AS precio
-        FROM con_vecinos
+        FROM evaluado
     """)
 
     _validar_integridad(con)
