@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 
@@ -48,6 +49,53 @@ SUPERFICIE = FONDO_TARJETA
 TEXTO = "#e8eef4"
 GRID = "#28405a"
 EJE = "#3d5770"
+
+# Estilo MapLibre casero (fondo solido, sin tiles) para el mapa de regiones,
+# codificado como STRING data:-URI en vez de pasar el dict directo en
+# layout.map.style. Bug real encontrado 2026-09-07: un dict se reconstruye
+# de cero en CADA rerun (dentro de Python es un objeto nuevo cada vez, y
+# cruza a JSON otra vez del lado del navegador), y Plotly.js/MapLibre no
+# comparan el CONTENIDO de layout.map.style para decidir si hace falta
+# recargar el estilo -- solo notan que "cambio" y llaman a map.setStyle(),
+# una operacion pesada que tira todo el mapa (WebGL) y lo reconstruye de
+# cero. Eso se veia como el mapa quedando en BLANCO totalmente por medio
+# segundo en CADA clic de region, antes de volver a aparecer -- mucho mas
+# grave que un simple parpadeo de color, y es justo lo que lo hacia sentir
+# pesado comparado al zoom (que es 100% del lado del cliente, nunca pasa
+# por Python). Una STRING constante, calculada UNA sola vez al importar el
+# modulo, es identica byte a byte entre reruns -- MapLibre puede notar que
+# no cambio y saltarse el setStyle() por completo.
+# Bug real encontrado 2026-09-07 (segunda vuelta, confirmado en 2 grabaciones
+# distintas cuadro por cuadro): con un layer "background" (sin fuente real,
+# "sources: {}"), el zoom en vivo mostraba saltos de un solo cuadro donde el
+# nivel de zoom retrocedia y volvia a saltar adelante -- un layer
+# "background" es zoom-invariante por diseño (no tiene geometria real ligada
+# al nivel de zoom), asi que MapLibre no tiene con que sincronizar sus
+# repintados durante el zoom con los poligonos de las regiones que SI dibuja
+# Plotly encima. Darle una fuente geojson real (aunque sea un poligono
+# invisible que cubre el mundo entero, con los datos INLINE -- no una URL,
+# cero pedidos de red) le da a MapLibre contenido de verdad que gestionar,
+# activando su logica normal de repintado sincronizado con el zoom.
+_ESTILO_MAPA_JSON = {
+    "version": 8,
+    "sources": {
+        "fondo-src": {
+            "type": "geojson",
+            "data": {
+                "type": "Feature",
+                "properties": {},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]]],
+                },
+            },
+        },
+    },
+    "layers": [{"id": "fondo", "type": "fill", "source": "fondo-src", "paint": {"fill-color": FONDO_TARJETA}}],
+}
+ESTILO_MAPA_DATA_URI = "data:application/json;base64," + base64.b64encode(
+    json.dumps(_ESTILO_MAPA_JSON).encode()
+).decode()
 
 ETIQUETAS_TIPO_PRECIO = {"Mínimo": "Minimo", "Promedio": "Promedio", "Máximo": "Maximo"}
 NOMBRES_MES_ABREV = {
@@ -173,7 +221,11 @@ st.sidebar.markdown("##### FILTROS AVANZADOS")
 
 opciones_region = _opciones(con, "SELECT nombre_region FROM dim_region ORDER BY nombre_region")
 if "region_seleccionada" not in st.session_state:
-    st.session_state["region_seleccionada"] = opciones_region[0]
+    # Lima por defecto (no la primera alfabetica, "Amazonas") -- es la region
+    # con mas historia y mas relevante para la mayoria de usuarios del
+    # dashboard. Si por algun motivo Lima no estuviera en el catalogo, cae al
+    # primer valor disponible en vez de fallar.
+    st.session_state["region_seleccionada"] = "Lima" if "Lima" in opciones_region else opciones_region[0]
 
 # Mapa clicable de Peru: alternativa visual al dropdown, no lo reemplaza --
 # 3 regiones de nuestro catalogo (Andahuaylas, Chota, Jaen) son provincias
@@ -236,6 +288,18 @@ fig_mapa = go.Figure(go.Choroplethmap(
     colorscale=[[0, "#3B73B3"], [1, COLOR_BUENO]],
     showscale=False, marker_line_color="rgba(255,255,255,0.4)", marker_line_width=1,
     hovertemplate="%{location}<extra></extra>",
+    # Plotly atenua las regiones "no seleccionadas" apenas se registra el
+    # clic DEL LADO DEL CLIENTE -- antes de que el servidor siquiera reciba
+    # el evento, mucho menos responda con el color correcto. Esa atenuacion
+    # se ve y se va sola cuando la respuesta del servidor llega con el color
+    # verde definitivo, lo que se siente como un parpadeo/doble cambio justo
+    # antes de que la seleccion "asiente" -- distinto al zoom, que es 100%
+    # del lado del cliente (MapLibre) y no pasa por el servidor para nada.
+    # Fijar la opacidad de seleccionado/no-seleccionado en 1 para ambos
+    # anula esa atenuacion automatica: el unico cambio de color que se ve es
+    # el que nosotros mandamos.
+    selected={"marker": {"opacity": 1}},
+    unselected={"marker": {"opacity": 1}},
 ))
 fig_mapa.update_layout(
     # "carto-darkmatter" es un basemap real: pide tiles de un servidor por
@@ -246,29 +310,30 @@ fig_mapa.update_layout(
     # solo necesitamos los poligonos de las 28 regiones, no calles ni
     # relieve real, un estilo MapLibre casero con un solo layer "background"
     # (sin sources, sin red) elimina el parpadeo de raiz: no hay tiles que
-    # cargar.
+    # cargar. ESTILO_MAPA_DATA_URI (definido arriba, junto a los colores) es
+    # una STRING constante -- no un dict armado aca mismo -- para que
+    # MapLibre pueda notar que no cambio entre reruns y no recargue todo el
+    # mapa (ver comentario junto a la constante).
     map={
-        "style": {
-            "version": 8,
-            "sources": {},
-            "layers": [{"id": "fondo", "type": "background", "paint": {"background-color": FONDO_TARJETA}}],
-        },
+        "style": ESTILO_MAPA_DATA_URI,
         "zoom": 4.3, "center": {"lat": -9.2, "lon": -75.0},
     },
     paper_bgcolor=FONDO_TARJETA, margin={"t": 4, "l": 4, "r": 4, "b": 4}, height=520,
-    # sin esto, CUALQUIER interaccion en la app (cambiar una fecha, tocar un
-    # radio button) reconstruye la figura entera y Plotly la redibuja con el
-    # zoom/centro de arriba, tirando abajo el acercamiento/desplazamiento que
-    # el usuario haya hecho a mano -- eso es lo que se sentia como "parpadeo"
-    # al arrastrar o hacer zoom. uirevision fijo le dice a Plotly "si este
-    # valor no cambio, conserva la vista que el usuario ya tiene".
     uirevision="mapa_peru",
+    # Mapa ESTATICO a proposito: sin zoom ni arrastre, solo clic para elegir
+    # region. Se probaron varios fixes para el parpadeo/salto durante el
+    # gesto de zoom (estilo sin tiles, fuente geojson real) sin exito --
+    # vive en el renderizado WebGL del navegador, fuera de lo que este
+    # codigo controla. dragmode=False (aca) + scrollZoom/doubleClick en
+    # False (en el config de abajo) apagan la interaccion de raiz en vez de
+    # seguir persiguiendo el sintoma.
+    dragmode=False,
 )
 with st.sidebar.container(border=True):
     st.caption("Clic en el mapa para elegir región")
     st.plotly_chart(
         fig_mapa, on_select="rerun", key="mapa_regiones", use_container_width=True,
-        config={"displayModeBar": False},
+        config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
     )
 
 # Región va reactiva y fuera del form (a proposito): no todas las variedades

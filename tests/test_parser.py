@@ -1,6 +1,8 @@
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from sisap.parser import (
     parse_resumen_dia,
     parse_resumen_intervalo,
@@ -128,3 +130,23 @@ def test_parse_resumen_mensual_dos_anios_doce_meses():
         r for r in registros if r.fecha == date(2025, 12, 1)
     )
     assert diciembre_2025.precio == 2.67
+
+
+def test_parse_resumen_mensual_pagina_de_error_falla_fuerte():
+    """Bug real encontrado 2026-09-07: cuando la consulta es muy grande (ej.
+    51 productos x 6 anios para Lima/Minorista, que tiene mas historial que
+    otras regiones), SISAP devuelve una pagina de error ("Se ha excedido el
+    tiempo limite...") en vez de la tabla de precios. Como esa pagina no
+    tiene ninguna fila <tr class=contenido>, antes de este fix la funcion
+    devolvia una lista VACIA en silencio -- guardar_registros() lo guardaba
+    como "0 registros nuevos" sin ningun error visible, y Lima se quedo con
+    14 productos minoristas en vez de ~85 durante meses sin que nadie lo
+    notara. Ahora debe fallar fuerte (ValueError) en vez de fallar en
+    silencio."""
+    html = (
+        '<p class=mensajeDeError>Se ha excedido el tiempo l&iacute;mite de '
+        "espera para la ejecuci&oacute;n de la consulta.</p>"
+    )
+
+    with pytest.raises(ValueError, match="SISAP devolvio una pagina de error"):
+        parse_resumen_mensual(html, region="Lima", variable="min_precio_prom")

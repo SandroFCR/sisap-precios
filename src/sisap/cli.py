@@ -2,6 +2,7 @@ import argparse
 import time
 from datetime import date, timedelta
 
+from sisap.models import PriceRecord
 from sisap.parser import (
     parse_resumen_dia,
     parse_resumen_intervalo,
@@ -194,15 +195,10 @@ def cmd_poblar_historico(args: argparse.Namespace) -> None:
     with crear_cliente() as client:
         for i, (cod_region, variable) in enumerate(combinaciones, start=1):
             nombre_region = CATALOGO_REGIONES[cod_region]
-            html = fetch_resumen_mensual(
-                client, anios=anios, region=cod_region,
+            registros = _traer_resumen_mensual_con_reintento(
+                client, anios=anios, region=cod_region, nombre_region=nombre_region,
                 productos=codigos_producto, variable=variable,
             )
-            guardar_html_crudo_mensual(
-                html, anios=anios, region=cod_region,
-                producto="todos", variable=variable,
-            )
-            registros = parse_resumen_mensual(html, region=nombre_region, variable=variable)
             guardar_registros(registros)
             total_registros += len(registros)
             print(
@@ -212,6 +208,35 @@ def cmd_poblar_historico(args: argparse.Namespace) -> None:
             time.sleep(PAUSA_ENTRE_REQUESTS_SEGUNDOS)
 
     print(f"Total: {total_registros} registros guardados (con posibles duplicados ya filtrados)")
+
+
+def _traer_resumen_mensual_con_reintento(
+    client, anios: list[int], region: str, nombre_region: str, productos: list[str], variable: str
+) -> list[PriceRecord]:
+    """Bug real encontrado 2026-09-07: Lima/Minorista y otras combinaciones
+    con mucho historial hacen que SISAP devuelva una pagina de error ("Se ha
+    excedido el tiempo limite...") en vez de la tabla de precios cuando se
+    piden todos los anios juntos -- parse_resumen_mensual ahora lo detecta y
+    falla fuerte (ValueError) en vez de devolver una lista vacia en
+    silencio. Aca se aprovecha esa señal: si el pedido completo falla, se
+    reintenta AÑO POR AÑO (que si entra dentro del limite de SISAP) en vez
+    de perder toda la combinacion region+variable de una."""
+    try:
+        html = fetch_resumen_mensual(client, anios=anios, region=region, productos=productos, variable=variable)
+        guardar_html_crudo_mensual(html, anios=anios, region=region, producto="todos", variable=variable)
+        return parse_resumen_mensual(html, region=nombre_region, variable=variable)
+    except ValueError:
+        print(f"    (pedido completo {min(anios)}-{max(anios)} fallo, reintentando anio por anio)")
+        registros: list[PriceRecord] = []
+        for anio in anios:
+            time.sleep(PAUSA_ENTRE_REQUESTS_SEGUNDOS)
+            try:
+                html = fetch_resumen_mensual(client, anios=[anio], region=region, productos=productos, variable=variable)
+                guardar_html_crudo_mensual(html, anios=[anio], region=region, producto="todos", variable=variable)
+                registros.extend(parse_resumen_mensual(html, region=nombre_region, variable=variable))
+            except ValueError:
+                print(f"      {nombre_region} / {variable} / {anio}: tambien fallo, se salta")
+        return registros
 
 
 def cmd_construir_dwh(_args: argparse.Namespace) -> None:

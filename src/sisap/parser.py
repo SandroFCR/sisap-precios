@@ -150,6 +150,23 @@ def parse_resumen_mensual(
     `td.numero[rel]`, que deja afuera tanto esa celda como la de equivalencia
     (que tampoco tiene rel en este modo).
     """
+    # Bug real encontrado 2026-09-07: cuando la consulta es muy grande (ej.
+    # los 51 productos x 6 anios para Lima/Minorista, que tiene mucho mas
+    # historial que otras regiones), SISAP no devuelve la tabla de precios
+    # sino una pagina de error ("Se ha excedido el tiempo limite...").  Como
+    # esa pagina no tiene ninguna fila <tr class=contenido>, el resto de esta
+    # funcion simplemente no encontraba nada que parsear y devolvia una
+    # lista vacia SIN avisar -- guardar_registros() lo guardaba como "0
+    # registros nuevos" sin error, y la falla quedaba invisible. Lima entero
+    # se quedo con 14 productos minoristas en vez de ~85 durante meses por
+    # esto. Fallar fuerte y claro aca evita que se repita en silencio.
+    if "mensajeDeError" in html:
+        raise ValueError(
+            f"SISAP devolvio una pagina de error en vez de datos (region={region}, "
+            f"variable={variable}) -- probablemente la consulta es muy grande. "
+            "Pedi menos anios o menos productos a la vez."
+        )
+
     soup = BeautifulSoup(html, "html.parser")
     registros: list[PriceRecord] = []
     unidad_actual = ""
