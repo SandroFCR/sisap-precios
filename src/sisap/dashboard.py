@@ -448,7 +448,8 @@ id_tramo = (df_linea["fecha"].diff().dt.days > UMBRAL_HUECO_DIAS).cumsum()
 
 with st.container(border=True):
     fig_linea = go.Figure()
-    for i, (_, tramo) in enumerate(df_linea.groupby(id_tramo)):
+    tramos = [tramo for _, tramo in df_linea.groupby(id_tramo)]
+    for i, tramo in enumerate(tramos):
         fig_linea.add_scatter(
             x=tramo["fecha"], y=tramo["precio"], mode="lines+markers",
             line={"color": COLOR_SERIE, "width": 2.5, "shape": "spline", "smoothing": 0.3},
@@ -460,6 +461,22 @@ with st.container(border=True):
             showlegend=False, legendgroup="precio", name="Precio",
             hovertemplate="%{x|%d %b %Y}<br>S/ %{y:.2f}<extra></extra>",
         )
+        # Puente PUNTEADO entre tramos: una recta solida daria a entender que
+        # el precio vario suave durante el hueco (justo lo que este mismo
+        # grafico evita al cortar la linea -- ver comentario de arriba), pero
+        # dejar el hueco completamente vacio se ve roto. Un trazo delgado,
+        # punteado, sin marcadores y sin relleno conecta visualmente los dos
+        # tramos sin fingir que son datos reales -- se lee como "no sabemos
+        # que paso aca", no como una tendencia.
+        if i > 0:
+            extremo_anterior = tramos[i - 1].iloc[[-1]]
+            extremo_actual = tramo.iloc[[0]]
+            puente = pd.concat([extremo_anterior, extremo_actual])
+            fig_linea.add_scatter(
+                x=puente["fecha"], y=puente["precio"], mode="lines",
+                line={"color": COLOR_SERIE, "width": 1.5, "dash": "dot"},
+                opacity=0.45, showlegend=False, hoverinfo="skip",
+            )
     st.plotly_chart(
         _layout_base(fig_linea, "Evolución histórica", "Precio (S/ por kg)"),
         use_container_width=True,
@@ -468,8 +485,8 @@ with st.container(border=True):
     if num_tramos > 1:
         st.caption(
             f"⚠ Hay {num_tramos - 1} hueco(s) de más de {UMBRAL_HUECO_DIAS} días "
-            "sin dato en este rango — la línea (y el relleno) se cortan ahí en vez "
-            "de dibujar una tendencia que no existe."
+            "sin dato en este rango — la línea punteada solo conecta visualmente "
+            "los tramos, no representa una tendencia real."
         )
 
 # --- Barras: variacion vs el ULTIMO dato real (no el mes calendario
