@@ -55,12 +55,12 @@ def test_cambiar_region_conserva_producto_si_existe_en_la_nueva():
     # referencia vieja queda atada al arbol anterior (con la lista de
     # opciones de ANTES), pedirla de nuevo evita comparar contra opciones
     # obsoletas.
-    at.sidebar.selectbox(key="region_seleccionada").set_value("Lima").run(timeout=30)
-    at.sidebar.selectbox(key="producto_seleccionado").set_value("Uva candy").run(timeout=30)
-    at.sidebar.selectbox(key="region_seleccionada").set_value("Puno").run(timeout=30)  # Puno no tiene "Uva candy"
+    at.selectbox(key="region_seleccionada").set_value("Lima").run(timeout=30)
+    at.selectbox(key="producto_seleccionado").set_value("Uva candy").run(timeout=30)
+    at.selectbox(key="region_seleccionada").set_value("Puno").run(timeout=30)  # Puno no tiene "Uva candy"
 
     assert not at.exception
-    assert at.sidebar.selectbox(key="producto_seleccionado").value != "Uva candy"
+    assert at.selectbox(key="producto_seleccionado").value != "Uva candy"
 
 
 def test_cambiar_region_a_una_con_el_mismo_producto_lo_conserva():
@@ -70,12 +70,12 @@ def test_cambiar_region_a_una_con_el_mismo_producto_lo_conserva():
     at = AppTest.from_file(RUTA_DASHBOARD)
     at.run(timeout=30)
 
-    at.sidebar.selectbox(key="region_seleccionada").set_value("Amazonas").run(timeout=30)
-    at.sidebar.selectbox(key="producto_seleccionado").set_value("Papa huayro").run(timeout=30)
-    at.sidebar.selectbox(key="region_seleccionada").set_value("Puno").run(timeout=30)
+    at.selectbox(key="region_seleccionada").set_value("Amazonas").run(timeout=30)
+    at.selectbox(key="producto_seleccionado").set_value("Papa huayro").run(timeout=30)
+    at.selectbox(key="region_seleccionada").set_value("Puno").run(timeout=30)
 
     assert not at.exception
-    assert at.sidebar.selectbox(key="producto_seleccionado").value == "Papa huayro"
+    assert at.selectbox(key="producto_seleccionado").value == "Papa huayro"
 
 
 def test_clic_en_mapa_actualiza_region_en_el_mismo_rerun():
@@ -92,7 +92,7 @@ def test_clic_en_mapa_actualiza_region_en_el_mismo_rerun():
     _simular_clic_mapa(at, "Puno").run(timeout=30)
 
     assert not at.exception
-    assert at.sidebar.selectbox(key="region_seleccionada").value == "Puno"
+    assert at.selectbox(key="region_seleccionada").value == "Puno"
 
 
 def test_clic_viejo_en_mapa_no_pisa_un_cambio_posterior_del_dropdown():
@@ -105,7 +105,33 @@ def test_clic_viejo_en_mapa_no_pisa_un_cambio_posterior_del_dropdown():
     at.run(timeout=30)
 
     _simular_clic_mapa(at, "Puno").run(timeout=30)
-    at.sidebar.selectbox(key="region_seleccionada").set_value("Cusco").run(timeout=30)
+    at.selectbox(key="region_seleccionada").set_value("Cusco").run(timeout=30)
 
     assert not at.exception
-    assert at.sidebar.selectbox(key="region_seleccionada").value == "Cusco"
+    assert at.selectbox(key="region_seleccionada").value == "Cusco"
+
+
+def test_boton_de_producto_destacado_no_pisa_una_region_no_aplicada():
+    """Bug real encontrado en produccion (2026-09-08): el boton de un
+    producto destacado (con foto) llamaba a st.rerun() antes de que el
+    script llegara a instanciar el selectbox de Región, mas abajo. Si el
+    usuario habia cambiado de región por el dropdown SIN apretar "Aplicar
+    filtros" y despues clickeaba un producto destacado, el script se
+    abortaba (por el rerun) antes de que Streamlit confirmara el valor
+    pendiente del selectbox -- la siguiente vez que se instanciaba, volvia
+    a su default ("Lima"). El producto se aplicaba bien, pero la región se
+    pisaba de vuelta a Lima sin que el usuario lo pidiera. El boton de un
+    widget YA dispara un rerun completo por si solo -- no hacia falta un
+    rerun propio, alcanzaba con dejar que el script siguiera su curso."""
+    at = AppTest.from_file(RUTA_DASHBOARD)
+    at.run(timeout=30)
+
+    # cambiar de region por el dropdown SIN aplicar filtros
+    at.selectbox(key="region_seleccionada").set_value("Arequipa").run(timeout=30)
+    assert at.session_state["filtros_aplicados"]["region"] == "Lima"  # todavia no aplicado
+
+    at.sidebar.button(key="btn_destacado_papa").click().run(timeout=30)
+
+    assert not at.exception
+    assert at.selectbox(key="region_seleccionada").value == "Arequipa"
+    assert at.session_state["filtros_aplicados"]["region"] == "Arequipa"

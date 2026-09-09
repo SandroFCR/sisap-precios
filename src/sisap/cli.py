@@ -53,13 +53,6 @@ CATALOGO_PRODUCTOS = {
     "0306": "Tarhui", "0228": "Tomate", "0637": "Uva", "0229": "Vainita",
     "0105": "Yuca", "0230": "Zanahoria", "0231": "Zapallo",
 }
-REGIONES_MVP = {
-    "150000": "Lima",
-    "040000": "Arequipa",
-    "080000": "Cusco",
-    "200000": "Piura",
-    "210000": "Puno",
-}
 # Catalogo completo de regiones de SISAP (28), incluye algunas provincias
 # reportadas aparte de su region (Andahuaylas, Chota, Jaen, Callao).
 CATALOGO_REGIONES = {

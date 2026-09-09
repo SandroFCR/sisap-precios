@@ -217,8 +217,6 @@ if not RUTA_DUCKDB.exists():
 
 con = conectar()
 
-st.sidebar.markdown("##### FILTROS AVANZADOS")
-
 opciones_region = _opciones(con, "SELECT nombre_region FROM dim_region ORDER BY nombre_region")
 if "region_seleccionada" not in st.session_state:
     # Lima por defecto (no la primera alfabetica, "Amazonas") -- es la region
@@ -336,60 +334,151 @@ with st.sidebar.container(border=True):
         config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
     )
 
-# Región va reactiva y fuera del form (a proposito): no todas las variedades
-# de un producto existen en todas las regiones (ej. la yuca es "Yuca
-# amarilla" en Lima pero "Yuca blanca" en Arequipa), y el dropdown de
-# Producto necesita actualizarse al toque cuando cambias de region -- eso no
-# pasa si esta dentro de un form, que solo procesa cambios al enviarlo.
-region = st.sidebar.selectbox("Región", opciones_region, key="region_seleccionada")
+# Selector visual con fotos reales, debajo del mapa -- pedido explicito del
+# usuario. No reemplaza el dropdown de Producto (sigue siendo la forma de
+# elegir cualquiera de los ~250 productos del catalogo) -- es un atajo
+# directo a los mas reconocibles. Cada boton busca, DENTRO de los productos
+# que existen para la region actual, el primero que contenga la palabra
+# clave (ej. "yuca" encuentra "Yuca amarilla" en Lima o "Yuca blanca" en
+# Arequipa, lo que exista) -- asi funciona en cualquier region sin mapear un
+# nombre EXACTO por region, igual que ya resuelve el dropdown de Producto.
+PRODUCTOS_DESTACADOS = [
+    ("papa.jpg", "Papa", "papa"),
+    ("cebolla.jpg", "Cebolla", "cebolla"),
+    ("tomate.jpg", "Tomate", "tomate"),
+    ("arroz.jpg", "Arroz", "arroz"),
+    ("yuca.jpg", "Yuca", "yuca"),
+    ("huevos.jpg", "Huevos", "huevos"),
+    ("aji.jpg", "Ají", "aji"),
+    ("pollo.jpg", "Pollo", "pollo"),
+    ("palta.jpg", "Palta", "palta"),
+    ("limon.jpg", "Limón", "limon"),
+]
+RUTA_PRODUCTOS_DESTACADOS = Path(__file__).parent / "assets" / "productos"
 
-fecha_min, fecha_max = con.execute(
-    "SELECT MIN(fecha), MAX(fecha) FROM fact_precios WHERE precio IS NOT NULL"
-).fetchone()
-
-# El resto de filtros si va en un form: cambiarlos no dispara nada hasta que
-# se aprieta "Aplicar filtros" -- evita recalcular los 3 graficos con cada
-# clic suelto en un radio button o cada tecla en el rango de fechas.
-with st.sidebar.form("form_filtros"):
-    opciones_producto = con.execute(
+with st.sidebar.container(border=True):
+    st.caption("Productos destacados")
+    productos_de_la_region = con.execute(
         """
         SELECT DISTINCT p.nombre_producto
         FROM fact_precios f
         JOIN dim_producto p ON f.producto_id = p.producto_id
         JOIN dim_region r ON f.region_id = r.region_id
         WHERE r.nombre_region = ?
-        ORDER BY 1
         """,
-        [region],
+        [st.session_state["region_seleccionada"]],
     ).df().iloc[:, 0].tolist()
-    # Bug real encontrado 2026-09-06: sin "key", este selectbox se identifica
-    # (entre otras cosas) por su lista de opciones -- al cambiar de Región,
-    # la lista cambia, Streamlit lo trata como un widget nuevo y lo resetea
-    # al primer producto de la nueva región SIN avisar. El usuario terminaba
-    # viendo un producto que nunca eligio (ej. cambiar a "Ucayali" saltaba
-    # solo a "Aceite clasico botella x 1l" porque es el primero alfabetico
-    # ahi), mientras el titulo/graficos seguian mostrando la combinacion
-    # aplicada anteriormente -- se leia como si la region, el producto del
-    # sidebar y los datos de la pagina fueran tres cosas distintas.
-    # Con "key" fijo, controlamos el reseteo nosotros: si el producto ya
-    # elegido sigue existiendo en la region nueva, se conserva; si no,
-    # recien ahi cae al primero de la lista.
-    if (
-        "producto_seleccionado" not in st.session_state
-        or st.session_state["producto_seleccionado"] not in opciones_producto
-    ):
-        st.session_state["producto_seleccionado"] = opciones_producto[0]
-    producto = st.selectbox("Producto", opciones_producto, key="producto_seleccionado")
-    tipo_mercado = st.radio(
-        "Tipo de mercado",
-        _opciones(con, "SELECT DISTINCT tipo_mercado FROM dim_variable ORDER BY 1"),
-    )
-    etiqueta_precio = st.selectbox("Tipo de precio", list(ETIQUETAS_TIPO_PRECIO))
-    rango = st.date_input(
-        "Rango de fechas", value=(fecha_min, fecha_max),
-        min_value=fecha_min, max_value=fecha_max,
-    )
-    aplicar = st.form_submit_button("Aplicar filtros", type="primary")
+    columnas_destacados = st.columns(2)
+    for indice, (archivo, etiqueta, palabra_clave) in enumerate(PRODUCTOS_DESTACADOS):
+        with columnas_destacados[indice % 2]:
+            st.image(str(RUTA_PRODUCTOS_DESTACADOS / archivo), use_container_width=True)
+            # Bug real encontrado 2026-09-08: un st.rerun() aca (antes de
+            # llegar al selectbox de Región, mas abajo en el script) le
+            # gana de mano a Streamlit -- si el script se aborta antes de
+            # INSTANCIAR ese selectbox en este mismo rerun, Streamlit no
+            # llega a confirmar su valor y lo resetea a "Lima" (el default)
+            # la vez siguiente que se instancia. El usuario terminaba
+            # viendo el producto correcto pero la region pisada de vuelta a
+            # Lima. El clic del boton YA dispara un rerun completo por si
+            # solo (como cualquier widget) -- no hace falta un rerun propio,
+            # solo dejar que el script siga su curso normal hasta el final,
+            # donde el selectbox si lee el session_state ya actualizado.
+            if st.button(etiqueta, key=f"btn_destacado_{palabra_clave}", use_container_width=True):
+                coincidencia = next(
+                    (p for p in productos_de_la_region if palabra_clave in p.lower()), None
+                )
+                if coincidencia:
+                    aplicados = dict(st.session_state["filtros_aplicados"])
+                    aplicados["producto"] = coincidencia
+                    aplicados["region"] = st.session_state["region_seleccionada"]
+                    st.session_state["filtros_aplicados"] = aplicados
+                    st.session_state["producto_seleccionado"] = coincidencia
+                else:
+                    st.toast(f"{etiqueta} no tiene datos en esta región.", icon="⚠️")
+
+# Región va reactiva y fuera del form (a proposito): no todas las variedades
+# de un producto existen en todas las regiones (ej. la yuca es "Yuca
+# amarilla" en Lima pero "Yuca blanca" en Arequipa), y el dropdown de
+# Producto necesita actualizarse al toque cuando cambias de region -- eso no
+# pasa si esta dentro de un form, que solo procesa cambios al enviarlo.
+#
+# Toda la barra de filtros se movio de la barra lateral a una tarjeta
+# horizontal arriba del titulo -- pedido explicito del usuario, para que se
+# sienta como un dashboard profesional (herramientas arriba, no escondidas
+# en un sidebar). Región va en su propia fila (tiene que quedar afuera del
+# form, ver arriba) y el resto comparte una segunda fila DENTRO del form con
+# columnas anidadas -- un patron simple y confiable en Streamlit, a
+# diferencia de intentar "reabrir" el mismo form desde columnas creadas por
+# separado (un form recuerda su propia posicion fija la primera vez que se
+# crea, asi que sus campos terminarian ahi, no en la columna donde se llamo
+# "with formulario:").
+fecha_min, fecha_max = con.execute(
+    "SELECT MIN(fecha), MAX(fecha) FROM fact_precios WHERE precio IS NOT NULL"
+).fetchone()
+
+with st.container(border=True):
+    col_region, _ = st.columns([1, 3])
+    with col_region:
+        region = st.selectbox("Región", opciones_region, key="region_seleccionada")
+
+    # El resto de filtros si va en un form: cambiarlos no dispara nada hasta
+    # que se aprieta "Aplicar filtros" -- evita recalcular los 3 graficos con
+    # cada clic suelto en un radio button o cada tecla en el rango de fechas.
+    with st.form("form_filtros"):
+        col_producto, col_mercado, col_precio, col_fechas, col_boton = st.columns(
+            [1.8, 1.3, 1.1, 1.7, 1]
+        )
+        with col_producto:
+            opciones_producto = con.execute(
+                """
+                SELECT DISTINCT p.nombre_producto
+                FROM fact_precios f
+                JOIN dim_producto p ON f.producto_id = p.producto_id
+                JOIN dim_region r ON f.region_id = r.region_id
+                WHERE r.nombre_region = ?
+                ORDER BY 1
+                """,
+                [region],
+            ).df().iloc[:, 0].tolist()
+            # Bug real encontrado 2026-09-06: sin "key", este selectbox se
+            # identifica (entre otras cosas) por su lista de opciones -- al
+            # cambiar de Región, la lista cambia, Streamlit lo trata como un
+            # widget nuevo y lo resetea al primer producto de la nueva
+            # región SIN avisar. El usuario terminaba viendo un producto que
+            # nunca eligio (ej. cambiar a "Ucayali" saltaba solo a "Aceite
+            # clasico botella x 1l" porque es el primero alfabetico ahi),
+            # mientras el titulo/graficos seguian mostrando la combinacion
+            # aplicada anteriormente -- se leia como si la region, el
+            # producto del filtro y los datos de la pagina fueran tres cosas
+            # distintas. Con "key" fijo, controlamos el reseteo nosotros: si
+            # el producto ya elegido sigue existiendo en la region nueva, se
+            # conserva; si no, recien ahi cae al primero de la lista.
+            if (
+                "producto_seleccionado" not in st.session_state
+                or st.session_state["producto_seleccionado"] not in opciones_producto
+            ):
+                st.session_state["producto_seleccionado"] = opciones_producto[0]
+            producto = st.selectbox("Producto", opciones_producto, key="producto_seleccionado")
+        with col_mercado:
+            tipo_mercado = st.radio(
+                "Tipo de mercado",
+                _opciones(con, "SELECT DISTINCT tipo_mercado FROM dim_variable ORDER BY 1"),
+                horizontal=True,
+            )
+        with col_precio:
+            etiqueta_precio = st.selectbox("Tipo de precio", list(ETIQUETAS_TIPO_PRECIO))
+        with col_fechas:
+            rango = st.date_input(
+                "Rango de fechas", value=(fecha_min, fecha_max),
+                min_value=fecha_min, max_value=fecha_max,
+            )
+        with col_boton:
+            # espaciador para que el boton quede a la altura de los otros
+            # widgets (que tienen una etiqueta arriba ocupando esa altura)
+            st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
+            aplicar = st.form_submit_button(
+                "Aplicar filtros", type="primary", use_container_width=True
+            )
 
 desde, hasta = rango if len(rango) == 2 else (fecha_min, fecha_max)
 tipo_precio = ETIQUETAS_TIPO_PRECIO[etiqueta_precio]
@@ -431,10 +520,18 @@ st.markdown(
 )
 
 if df.empty:
+    # El mensaje no asume cual de los dos (mayorista/minorista) es el que
+    # falta -- SISAP puede no tener cualquiera de los dos segun la region
+    # (ej. Lima y Callao no tienen mercado mayorista de carnes, pero si
+    # tienen minorista). Bug real encontrado 2026-09-07: el mensaje antes
+    # decia "no reporta precio minorista" fijo, que quedaba al reves cuando
+    # justo el mayorista era el que faltaba.
     st.warning(
         "No hay datos para esta combinación exacta de filtros. SISAP no "
-        "reporta precio minorista para todos los productos/regiones/fechas "
-        "por igual -- prueba otro producto, región o tipo de precio."
+        "reporta todas las combinaciones de producto/región/tipo de mercado "
+        "por igual (ej. Lima y Callao no tienen mercado mayorista para "
+        "varios productos) -- prueba otro producto, región, tipo de mercado "
+        "o tipo de precio."
     )
     st.stop()
 
@@ -457,7 +554,7 @@ if len(df) >= 2:
 
 col1, col2, col3, col4 = st.columns(4)
 with col1, st.container(border=True):
-    st.caption(f"PRECIO ACTUAL ({df['fecha'].iloc[-1].strftime('%d/%m/%Y')}) ⓘ", help="Último dato dentro del rango elegido")
+    st.caption("PRECIO ACTUAL ⓘ", help="Último dato dentro del rango elegido")
     st.markdown(f"### S/ {precio_actual:.2f}")
     if delta_pct is not None:
         # badge de tendencia: fondo tenue + texto en color de estado + icono
@@ -542,10 +639,18 @@ with st.container(border=True):
                 line={"color": COLOR_SERIE, "width": 1.5, "dash": "dot"},
                 opacity=0.45, showlegend=False, hoverinfo="skip",
             )
-    st.plotly_chart(
-        _layout_base(fig_linea, "Evolución histórica", "Precio (S/ por kg)"),
-        use_container_width=True,
+    # Barra de rango debajo del grafico: mini-vista de TODA la serie con un
+    # cursor que se arrastra para elegir que tramo mirar de cerca -- pedido
+    # explicito para que cualquiera (sin saber de scroll-zoom ni de clics
+    # con el mouse) pueda navegar el historico con solo arrastrar.
+    _layout_base(fig_linea, "Evolución histórica", "Precio (S/ por kg)")
+    fig_linea.update_xaxes(
+        rangeslider={
+            "visible": True, "thickness": 0.09,
+            "bgcolor": FONDO_TARJETA, "bordercolor": GRID, "borderwidth": 1,
+        },
     )
+    st.plotly_chart(fig_linea, use_container_width=True)
     num_tramos = id_tramo.nunique()
     if num_tramos > 1:
         st.caption(
@@ -554,81 +659,48 @@ with st.container(border=True):
             "los tramos, no representa una tendencia real."
         )
 
-# --- Barras: variacion vs el ULTIMO dato real (no el mes calendario
-# anterior) -- si se resamplea a meses y se calcula pct_change antes de
-# quitar los meses vacios, un hueco hace que pandas compare contra NaN y el
-# cambio real (a veces el mas grande) desaparece en silencio. Bug real
-# encontrado 2026-09-06: el cambio de -39.75% de dic-2024 a ene-2026 no
-# aparecia porque el "mes anterior" (dic-2025) estaba vacio.
-mensual = (
-    df.set_index("fecha")["precio"]
-    .resample("MS").mean()
-    .dropna()
-    .reset_index()
-)
-mensual["meses_desde_dato_anterior"] = (
-    mensual["fecha"].diff().dt.days / 30.4
-).round().astype("Int64")
-mensual["cambio_pct"] = mensual["precio"].pct_change() * 100
-mensual = mensual.dropna(subset=["cambio_pct"])
-mensual["etiqueta"] = mensual["fecha"].apply(
-    lambda f: f"{NOMBRES_MES_ABREV[f.month]} {f.year}"
-)
+# --- Linea: ultimos dias -- pedido explicito para tener un grafico "por
+# dia, del ultimo mes" ademas del historico mensual de arriba. SISAP solo
+# publica dato DIARIO real para un puñado de productos (papa, arroz,
+# cebolla, tomate, yuca) y SOLO en Lima -- via la automatizacion diaria
+# (cli.py cmd_hoy). El resto del catalogo (y todas las demas regiones) solo
+# tiene el agregado mensual, sin excepcion. Mostrar esto como un grafico
+# vacio para el 95%+ de los productos seria peor que no mostrarlo, asi que
+# se detecta si existe densidad diaria REAL antes de dibujar: una serie
+# puramente mensual nunca tiene 2 fechas distintas en el MISMO mes
+# calendario (cada mes aporta un solo punto, el agregado), asi que
+# encontrar 2+ fechas en un mismo mes es prueba de que hay dato diario de
+# verdad, no solo el agregado cayendo en la ventana.
+ultimo_dato = df["fecha"].max()
+ventana_diaria = df[df["fecha"] >= ultimo_dato - pd.Timedelta(days=35)].copy()
+ventana_diaria["anio_mes"] = ventana_diaria["fecha"].dt.to_period("M")
+hay_dato_diario = (ventana_diaria.groupby("anio_mes").size() > 1).any()
 
 with st.container(border=True):
-    # Hacen falta al menos 2 barras. Bug real encontrado 2026-09-06, en dos
-    # vueltas: (1) con eje CATEGORICO, cada barra ocupa 1/N del ancho total
-    # sin importar cuan lejos esten sus fechas reales -- con pocos meses muy
-    # juntos entre si (ej. Aceite clasico/Amazonas: solo 3 meses reales
-    # separados por un hueco de 13 meses antes) se veian bloques gigantes
-    # pegados, como si fuera un cambio violento y continuo. (2) Pasar a un
-    # eje de FECHA real con ancho FIJO en milisegundos no arreglaba eso --
-    # con solo 3 barras ya de por si juntas en una ventana angosta, cualquier
-    # ancho razonable ocupa buena parte del grafico; el problema nunca fue el
-    # ancho, es que 2-3 puntos aislados no alcanzan para leerse como
-    # tendencia sea como sea. Dejar que Plotly INFIERA el ancho a partir de
-    # la separacion real entre las barras (sin fijarlo) da el mejor resultado
-    # tanto en series densas como dispersas -- excepto con exactamente 1
-    # barra, donde Plotly no tiene de donde inferir nada y dibuja un bloque
-    # gigante con ticks en microsegundos (el motivo original para probar un
-    # ancho fijo). Por eso el minimo es 2, no 1.
-    if len(mensual) >= 2:
-        colores = [COLOR_MALO if v > 0 else COLOR_BUENO for v in mensual["cambio_pct"]]
-        # el texto de comparacion es honesto sobre el hueco: "vs mes anterior"
-        # si son 1-2 meses, o "vs hace N meses" si hubo un salto mas grande
-        etiqueta_comparacion = [
-            "vs. mes anterior" if n <= 2 else f"vs. hace {n} meses"
-            for n in mensual["meses_desde_dato_anterior"]
-        ]
-        fig_barras = go.Figure()
-        fig_barras.add_bar(
-            x=mensual["fecha"], y=mensual["cambio_pct"],
-            marker_color=colores, marker_line_width=0,
-            customdata=list(zip(mensual["etiqueta"], etiqueta_comparacion)),
-            hovertemplate="%{customdata[0]}<br>%{y:+.1f}% %{customdata[1]}<extra></extra>",
-        )
-        fig_barras.update_traces(marker={"cornerradius": 4})
-        # Bug real encontrado 2026-09-06: cuando el ultimo dato queda muy
-        # lejos del resto (ej. Aceite clasico botella x1l/Lima: cluster
-        # denso en 2021-2022, un solo dato aislado en ago-2026), el
-        # autorango de Plotly no deja margen suficiente para la barra mas
-        # reciente -- su mitad derecha queda pegada (a veces literalmente
-        # cortada) contra el borde del grafico. Fijar el rango a mano con
-        # un margen fijo evita depender del autorango en este caso limite.
-        margen = pd.Timedelta(days=20)
-        fig_barras.update_layout(
-            bargap=0.15,
-            xaxis={
-                "tickangle": 0,
-                "range": [mensual["fecha"].min() - margen, mensual["fecha"].max() + margen],
-            },
+    if hay_dato_diario:
+        fig_dias = go.Figure()
+        fig_dias.add_scatter(
+            x=ventana_diaria["fecha"], y=ventana_diaria["precio"], mode="lines+markers",
+            line={"color": COLOR_SERIE, "width": 2.5, "shape": "spline", "smoothing": 0.3},
+            marker={"size": 6},
+            fill="tozeroy", fillcolor=f"rgba({COLOR_SERIE_RGB},0.15)",
+            hovertemplate="%{x|%d %b %Y}<br>S/ %{y:.2f}<extra></extra>",
         )
         st.plotly_chart(
-            _layout_base(fig_barras, "Variación del precio", "% vs. dato anterior"),
+            _layout_base(fig_dias, "Últimos días", "Precio (S/ por kg)"),
             use_container_width=True,
         )
+        st.caption(
+            "Dato diario real (no agregado mensual) — solo disponible para un "
+            "grupo reducido de productos en Lima."
+        )
     else:
-        st.info("Se necesita más de un mes de datos para mostrar la variación mensual.")
+        st.info(
+            "SISAP no publica dato diario para este producto o región — solo un "
+            "grupo reducido de productos (papa, arroz, cebolla, tomate, yuca) "
+            "tiene esa granularidad, y solo en Lima. El resto del catálogo se "
+            "reporta a nivel mensual (ver 'Evolución histórica' arriba)."
+        )
 
 # --- Barras: comparacion regional (mismo hue: es magnitud, no identidad) ---
 comparacion = con.execute(
