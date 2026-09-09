@@ -135,3 +135,23 @@ def test_boton_de_producto_destacado_no_pisa_una_region_no_aplicada():
     assert not at.exception
     assert at.selectbox(key="region_seleccionada").value == "Arequipa"
     assert at.session_state["filtros_aplicados"]["region"] == "Arequipa"
+
+
+def test_todo_el_peru_agrega_entre_regiones_sin_romper():
+    """Feature pedida explicitamente (2026-09-09): una opcion "Todo el Peru"
+    en el selector de Region que promedia el precio entre todas las regiones
+    que reportan cada fecha, en vez de mostrar una sola. Cubre el camino
+    completo: la opcion existe en el dropdown, se puede aplicar, y no rompe
+    ni la lista de productos (que ya no filtra por region) ni los graficos
+    (que dependen de que el df resultante tenga las mismas columnas que el
+    modo de una region)."""
+    at = AppTest.from_file(RUTA_DASHBOARD)
+    at.run(timeout=30)
+
+    assert "Todo el Perú" in at.selectbox(key="region_seleccionada").options
+
+    at.selectbox(key="region_seleccionada").set_value("Todo el Perú").run(timeout=30)
+    at.button(key="FormSubmitter:form_filtros-Aplicar filtros").click().run(timeout=30)
+
+    assert not at.exception
+    assert at.session_state["filtros_aplicados"]["region"] == "Todo el Perú"

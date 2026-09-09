@@ -23,14 +23,6 @@ from sisap.storage import (
 )
 from sisap.warehouse import construir_modelo_dimensional
 
-REGION_LIMA = "150000"
-PRODUCTOS_MVP = {
-    "0104": "Papa",
-    "0212": "Cebolla",
-    "0401": "Arroz",
-    "0228": "Tomate",
-    "0105": "Yuca",
-}
 # Catalogo completo de SISAP (51 generos), extraido del checkbox de
 # productos de la pagina. El modo mensual acepta VARIOS productos[] en una
 # sola peticion (probado: los 51 juntos = 1 request de ~8s, no 51 requests),
@@ -71,71 +63,176 @@ VARIABLES_MVP = [
     "may_precio_min", "may_precio_prom", "may_precio_max",
     "min_precio_min", "min_precio_prom", "min_precio_max",
 ]
+# Regiones con automatizacion diaria/intervalo (dato SUB-mensual real, no
+# solo el agregado mensual de poblar-historico). Bug real encontrado
+# 2026-09-09/10: primero Huevos, despues Carne de pollo aparecieron con
+# dato diario real en el sitio de SISAP que nunca capturamos porque
+# cmd_hoy/cmd_historico solo pedian un puñado de productos fijos
+# (PRODUCTOS_MVP, ahora eliminado) -- y solo Lima. Como fetch_resumen_dia y
+# fetch_resumen_intervalo ya mandan TODOS los productos[] pedidos en una
+# sola peticion (ver scraper.py), pedir el CATALOGO_PRODUCTOS completo no
+# cuesta mas requests que pedir 6 -- el costo real crece con la cantidad de
+# REGIONES (una peticion por region), no de productos. Se eligieron estas 4
+# (la de mas trafico del dashboard + 3 regiones grandes de prueba) en vez
+# de las 28 para no disparar el tiempo de la automatizacion diaria; se
+# puede sumar mas regiones despues sin tocar la logica, solo esta lista.
+REGIONES_AUTOMATIZADAS = {
+    "150000": "Lima",
+    "040000": "Arequipa",
+    "080000": "Cusco",
+    "200000": "Piura",
+}
 PAUSA_ENTRE_REQUESTS_SEGUNDOS = 1.5
 
 
 def cmd_hoy(_args: argparse.Namespace) -> None:
-    """Snapshot de precios de hoy: una fila por producto, todas las
-    variables en la misma peticion (ver parse_resumen_dia)."""
+    """Snapshot de precios de hoy: una peticion por region (con TODOS los
+    productos y variables juntos en cada una, ver parse_resumen_dia)."""
     fecha = date.today()
-    codigos_producto = list(PRODUCTOS_MVP)
+    codigos_producto = list(CATALOGO_PRODUCTOS)
+    total_registros = 0
 
     with crear_cliente() as client:
-        html = fetch_resumen_dia(
-            client,
-            fecha=fecha,
-            region=REGION_LIMA,
-            productos=codigos_producto,
-            variables=VARIABLES_MVP,
-        )
+        for cod_region, nombre_region in REGIONES_AUTOMATIZADAS.items():
+            registros = _traer_resumen_dia_con_reintento(
+                client, fecha=fecha, region=cod_region, nombre_region=nombre_region,
+                productos=codigos_producto,
+            )
+            ruta = guardar_registros(registros)
+            total_registros += len(registros)
+            print(f"  {nombre_region}: {len(registros)} registros guardados en {ruta}")
+            time.sleep(PAUSA_ENTRE_REQUESTS_SEGUNDOS)
 
-    guardar_html_crudo(html, fecha=fecha, region=REGION_LIMA)
-    registros = parse_resumen_dia(
-        html, fecha=fecha, region="Lima", variables=VARIABLES_MVP
-    )
-    ruta = guardar_registros(registros)
-    print(f"{len(registros)} registros guardados en {ruta}")
+    print(f"Total: {total_registros} registros guardados")
+
+
+def _traer_resumen_dia_con_reintento(
+    client, fecha: date, region: str, nombre_region: str, productos: list[str]
+) -> list[PriceRecord]:
+    """Igual estrategia que _traer_resumen_mensual_con_reintento: si SISAP
+    devuelve la pagina de error (parse_resumen_dia ahora lo detecta y falla
+    fuerte), se intenta diagnosticar POR QUE antes de reintentar a ciegas:
+    - Si hasta un solo producto falla, la causa no es "pedimos demasiado"
+      (splitting no ayudaria nunca) sino que la region/periodicidad no
+      existe en SISAP -- bug real encontrado 2026-09-10: Cusco no tiene
+      reporte "Dia" NI "Intervalo de Tiempo" (falla incluso 1 producto, 1
+      dia), aunque si tiene "Mensual". Reintentar particionando productos
+      ahi solo agrega minutos de requests condenados a fallar -- se rinde
+      rapido en su lugar.
+    - Si el producto solo SI funciona, el problema era de tamaño (como el
+      bug ya conocido en modo mensual): se reintenta UNA vez partiendo el
+      resto de productos a la mitad (sin recursion mas profunda, para
+      acotar el costo)."""
+    try:
+        html = fetch_resumen_dia(
+            client, fecha=fecha, region=region, productos=productos, variables=VARIABLES_MVP
+        )
+        guardar_html_crudo(html, fecha=fecha, region=region)
+        return parse_resumen_dia(html, fecha=fecha, region=nombre_region, variables=VARIABLES_MVP)
+    except ValueError:
+        if len(productos) <= 1:
+            return []
+        time.sleep(PAUSA_ENTRE_REQUESTS_SEGUNDOS)
+        try:
+            html_probe = fetch_resumen_dia(
+                client, fecha=fecha, region=region, productos=productos[:1], variables=VARIABLES_MVP
+            )
+            parse_resumen_dia(html_probe, fecha=fecha, region=nombre_region, variables=VARIABLES_MVP)
+        except ValueError:
+            print(f"    {nombre_region}: sin reporte 'Dia' en SISAP para esta fecha, se salta la region")
+            return []
+
+        mitad = len(productos) // 2
+        registros: list[PriceRecord] = []
+        for sub in (productos[:mitad], productos[mitad:]):
+            time.sleep(PAUSA_ENTRE_REQUESTS_SEGUNDOS)
+            try:
+                html_sub = fetch_resumen_dia(
+                    client, fecha=fecha, region=region, productos=sub, variables=VARIABLES_MVP
+                )
+                guardar_html_crudo(html_sub, fecha=fecha, region=region)
+                registros.extend(
+                    parse_resumen_dia(html_sub, fecha=fecha, region=nombre_region, variables=VARIABLES_MVP)
+                )
+            except ValueError:
+                print(f"    {nombre_region} / {len(sub)} productos: fallo, se salta ese grupo")
+        return registros
 
 
 def cmd_historico(args: argparse.Namespace) -> None:
-    """Backfill historico: una peticion por mes y por variable (ver
+    """Backfill historico: una peticion por region, mes y variable (ver
     parse_resumen_intervalo), con pausa entre requests para no saturar
     el servidor."""
     desde = date.fromisoformat(args.desde)
     hasta = date.fromisoformat(args.hasta)
-    codigos_producto = list(PRODUCTOS_MVP)
+    codigos_producto = list(CATALOGO_PRODUCTOS)
     total_registros = 0
 
     with crear_cliente() as client:
-        for inicio_mes, fin_mes in _dividir_por_mes(desde, hasta):
-            for variable in VARIABLES_MVP:
-                html = fetch_resumen_intervalo(
-                    client,
-                    desde=inicio_mes,
-                    hasta=fin_mes,
-                    region=REGION_LIMA,
-                    productos=codigos_producto,
-                    variable=variable,
-                )
-                guardar_html_crudo_intervalo(
-                    html,
-                    desde=inicio_mes,
-                    hasta=fin_mes,
-                    region=REGION_LIMA,
-                    variable=variable,
-                )
-                registros = parse_resumen_intervalo(
-                    html, region="Lima", variable=variable
-                )
-                guardar_registros(registros)
-                total_registros += len(registros)
-                print(
-                    f"  {inicio_mes} a {fin_mes} / {variable}: "
-                    f"{len(registros)} registros"
-                )
-                time.sleep(PAUSA_ENTRE_REQUESTS_SEGUNDOS)
+        for cod_region, nombre_region in REGIONES_AUTOMATIZADAS.items():
+            for inicio_mes, fin_mes in _dividir_por_mes(desde, hasta):
+                for variable in VARIABLES_MVP:
+                    registros = _traer_resumen_intervalo_con_reintento(
+                        client, desde=inicio_mes, hasta=fin_mes, region=cod_region,
+                        nombre_region=nombre_region, productos=codigos_producto, variable=variable,
+                    )
+                    guardar_registros(registros)
+                    total_registros += len(registros)
+                    print(
+                        f"  {nombre_region} / {inicio_mes} a {fin_mes} / {variable}: "
+                        f"{len(registros)} registros"
+                    )
+                    time.sleep(PAUSA_ENTRE_REQUESTS_SEGUNDOS)
 
     print(f"Total: {total_registros} registros guardados (con posibles duplicados ya filtrados)")
+
+
+def _traer_resumen_intervalo_con_reintento(
+    client, desde: date, hasta: date, region: str, nombre_region: str,
+    productos: list[str], variable: str,
+) -> list[PriceRecord]:
+    """Mismo diagnostico que _traer_resumen_dia_con_reintento (ver arriba):
+    primero prueba si un solo producto pasa (si ni eso funciona, la region
+    no tiene este tipo de reporte en SISAP -- no vale la pena particionar) y
+    recien ahi, si el problema era de tamaño, reintenta partiendo el resto a
+    la mitad UNA vez. Bug real encontrado 2026-09-10: pedir el catalogo
+    completo (51 productos) para Cusco devolvio la pagina de error de SISAP
+    en las 12 combinaciones de mes/variable -- resulto ser que Cusco no
+    tiene reporte de Intervalo de Tiempo en absoluto (falla incluso con 1
+    solo producto), asi que particionar productos ahi solo agregaba minutos
+    de requests condenados a fallar."""
+    try:
+        html = fetch_resumen_intervalo(
+            client, desde=desde, hasta=hasta, region=region, productos=productos, variable=variable
+        )
+        guardar_html_crudo_intervalo(html, desde=desde, hasta=hasta, region=region, variable=variable)
+        return parse_resumen_intervalo(html, region=nombre_region, variable=variable)
+    except ValueError:
+        if len(productos) <= 1:
+            return []
+        time.sleep(PAUSA_ENTRE_REQUESTS_SEGUNDOS)
+        try:
+            html_probe = fetch_resumen_intervalo(
+                client, desde=desde, hasta=hasta, region=region, productos=productos[:1], variable=variable
+            )
+            parse_resumen_intervalo(html_probe, region=nombre_region, variable=variable)
+        except ValueError:
+            print(f"    {nombre_region} / {variable}: sin reporte 'Intervalo de Tiempo' en SISAP, se salta la region")
+            return []
+
+        mitad = len(productos) // 2
+        registros: list[PriceRecord] = []
+        for sub in (productos[:mitad], productos[mitad:]):
+            time.sleep(PAUSA_ENTRE_REQUESTS_SEGUNDOS)
+            try:
+                html_sub = fetch_resumen_intervalo(
+                    client, desde=desde, hasta=hasta, region=region, productos=sub, variable=variable
+                )
+                guardar_html_crudo_intervalo(html_sub, desde=desde, hasta=hasta, region=region, variable=variable)
+                registros.extend(parse_resumen_intervalo(html_sub, region=nombre_region, variable=variable))
+            except ValueError:
+                print(f"    {nombre_region} / {variable} / {len(sub)} productos: fallo, se salta ese grupo")
+        return registros
 
 
 def cmd_consultar(args: argparse.Namespace) -> None:

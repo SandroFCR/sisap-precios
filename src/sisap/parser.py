@@ -20,6 +20,17 @@ def parse_resumen_dia(
     hay que filtrar especificamente por `class=numero`, que es la unica marca
     confiable de "esto es un valor, no una columna de unidad repetida".
     """
+    # Mismo chequeo que parse_resumen_mensual/parse_resumen_intervalo: pedir
+    # de mas (ahora cmd_hoy pide el catalogo completo por region, ver
+    # cli.py) puede hacer que SISAP devuelva la pagina de error en vez de la
+    # tabla -- sin este chequeo, quedaria como "0 registros" sin avisar.
+    if "mensajeDeError" in html:
+        raise ValueError(
+            f"SISAP devolvio una pagina de error en vez de datos (region={region}, "
+            f"fecha={fecha}) -- probablemente la consulta es muy grande. Pedi "
+            "menos productos a la vez."
+        )
+
     soup = BeautifulSoup(html, "html.parser")
     registros: list[PriceRecord] = []
 
@@ -83,6 +94,21 @@ def parse_resumen_intervalo(
     con texto, es una violacion de este supuesto: mejor fallar fuerte que
     perder datos en silencio.
     """
+    # Bug real encontrado 2026-09-10: el mismo problema ya documentado en
+    # parse_resumen_mensual (pedir de mas hace que SISAP devuelva una pagina
+    # de error en vez de la tabla) tambien pasa en modo intervalo -- probado
+    # pidiendo el catalogo completo (51 productos) para Cusco, que devolvio
+    # la pagina de error en las 12 combinaciones de mes/variable. Como esta
+    # funcion no tenia el chequeo, esas 12 llamadas se guardaron como "0
+    # registros" sin ningun aviso -- Cusco se hubiera quedado sin dato de
+    # intervalo por completo, en silencio. Mismo fix: fallar fuerte.
+    if "mensajeDeError" in html:
+        raise ValueError(
+            f"SISAP devolvio una pagina de error en vez de datos (region={region}, "
+            f"variable={variable}) -- probablemente la consulta es muy grande. "
+            "Pedi menos productos o un rango mas chico a la vez."
+        )
+
     soup = BeautifulSoup(html, "html.parser")
     registros: list[PriceRecord] = []
 

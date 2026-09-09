@@ -98,6 +98,14 @@ ESTILO_MAPA_DATA_URI = "data:application/json;base64," + base64.b64encode(
 ).decode()
 
 ETIQUETAS_TIPO_PRECIO = {"Mínimo": "Minimo", "Promedio": "Promedio", "Máximo": "Maximo"}
+# Opcion agregada del selector de Region -- pedido explicito del usuario para
+# comparar el pais entero en vez de una region a la vez. No es una region
+# real de dim_region: en vez de filtrar por r.nombre_region, las consultas de
+# mas abajo la detectan y agregan (promedio simple) entre todas las regiones
+# que reportan cada fecha. No todas las regiones reportan el mismo mes, asi
+# que el promedio puede variar de a que regiones aportaron ese punto -- se
+# aclara con un caption en vez de tratar de rellenar los huecos.
+TODO_EL_PERU = "Todo el Perú"
 NOMBRES_MES_ABREV = {
     1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
     7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic",
@@ -217,7 +225,9 @@ if not RUTA_DUCKDB.exists():
 
 con = conectar()
 
-opciones_region = _opciones(con, "SELECT nombre_region FROM dim_region ORDER BY nombre_region")
+opciones_region = [TODO_EL_PERU] + _opciones(
+    con, "SELECT nombre_region FROM dim_region ORDER BY nombre_region"
+)
 if "region_seleccionada" not in st.session_state:
     # Lima por defecto (no la primera alfabetica, "Amazonas") -- es la region
     # con mas historia y mas relevante para la mayoria de usuarios del
@@ -358,16 +368,30 @@ RUTA_PRODUCTOS_DESTACADOS = Path(__file__).parent / "assets" / "productos"
 
 with st.sidebar.container(border=True):
     st.caption("Productos destacados")
-    productos_de_la_region = con.execute(
-        """
-        SELECT DISTINCT p.nombre_producto
-        FROM fact_precios f
-        JOIN dim_producto p ON f.producto_id = p.producto_id
-        JOIN dim_region r ON f.region_id = r.region_id
-        WHERE r.nombre_region = ?
-        """,
-        [st.session_state["region_seleccionada"]],
-    ).df().iloc[:, 0].tolist()
+    if st.session_state["region_seleccionada"] == TODO_EL_PERU:
+        productos_de_la_region = con.execute(
+            "SELECT DISTINCT p.nombre_producto FROM fact_precios f "
+            "JOIN dim_producto p ON f.producto_id = p.producto_id ORDER BY 1"
+        ).df().iloc[:, 0].tolist()
+    else:
+        # ORDER BY: sin el, el orden de "SELECT DISTINCT" no esta garantizado
+        # -- para una palabra clave con varias coincidencias (ej. "papa" hace
+        # match con "Papa canchan", "Papa negra andina", etc.) el boton
+        # terminaba eligiendo una variedad distinta en cada rerun, sin que el
+        # usuario cambiara nada. Bug real encontrado 2026-09-09 verificando
+        # el modo "Todo el Peru" con Playwright: el mismo boton "Papa"
+        # aplicaba un producto diferente entre una corrida y la siguiente.
+        productos_de_la_region = con.execute(
+            """
+            SELECT DISTINCT p.nombre_producto
+            FROM fact_precios f
+            JOIN dim_producto p ON f.producto_id = p.producto_id
+            JOIN dim_region r ON f.region_id = r.region_id
+            WHERE r.nombre_region = ?
+            ORDER BY 1
+            """,
+            [st.session_state["region_seleccionada"]],
+        ).df().iloc[:, 0].tolist()
     columnas_destacados = st.columns(2)
     for indice, (archivo, etiqueta, palabra_clave) in enumerate(PRODUCTOS_DESTACADOS):
         with columnas_destacados[indice % 2]:
@@ -429,17 +453,23 @@ with st.container(border=True):
             [1.8, 1.3, 1.1, 1.7, 1]
         )
         with col_producto:
-            opciones_producto = con.execute(
-                """
-                SELECT DISTINCT p.nombre_producto
-                FROM fact_precios f
-                JOIN dim_producto p ON f.producto_id = p.producto_id
-                JOIN dim_region r ON f.region_id = r.region_id
-                WHERE r.nombre_region = ?
-                ORDER BY 1
-                """,
-                [region],
-            ).df().iloc[:, 0].tolist()
+            if region == TODO_EL_PERU:
+                opciones_producto = con.execute(
+                    "SELECT DISTINCT p.nombre_producto FROM fact_precios f "
+                    "JOIN dim_producto p ON f.producto_id = p.producto_id ORDER BY 1"
+                ).df().iloc[:, 0].tolist()
+            else:
+                opciones_producto = con.execute(
+                    """
+                    SELECT DISTINCT p.nombre_producto
+                    FROM fact_precios f
+                    JOIN dim_producto p ON f.producto_id = p.producto_id
+                    JOIN dim_region r ON f.region_id = r.region_id
+                    WHERE r.nombre_region = ?
+                    ORDER BY 1
+                    """,
+                    [region],
+                ).df().iloc[:, 0].tolist()
             # Bug real encontrado 2026-09-06: sin "key", este selectbox se
             # identifica (entre otras cosas) por su lista de opciones -- al
             # cambiar de Región, la lista cambia, Streamlit lo trata como un
@@ -496,21 +526,47 @@ tipo_mercado = filtros_aplicados["tipo_mercado"]
 etiqueta_precio, tipo_precio = filtros_aplicados["etiqueta_precio"], filtros_aplicados["tipo_precio"]
 desde, hasta = filtros_aplicados["desde"], filtros_aplicados["hasta"]
 
-df = con.execute(
-    """
-    SELECT f.fecha, f.precio / f.equivalencia_kg AS precio, f.unidad, f.equivalencia_kg
-    FROM fact_precios f
-    JOIN dim_producto p ON f.producto_id = p.producto_id
-    JOIN dim_region r ON f.region_id = r.region_id
-    JOIN dim_variable v ON f.variable_id = v.variable_id
-    WHERE p.nombre_producto = ? AND r.nombre_region = ?
-      AND v.tipo_mercado = ? AND v.tipo_precio = ?
-      AND f.fecha BETWEEN ? AND ?
-      AND f.precio IS NOT NULL
-    ORDER BY f.fecha
-    """,
-    [producto, region, tipo_mercado, tipo_precio, desde, hasta],
-).df()
+if region == TODO_EL_PERU:
+    # Promedio nacional simple: una fila por fecha, promediando entre TODAS
+    # las regiones que reportan ese producto/mercado/tipo_precio ese dia --
+    # no todas las regiones reportan el mismo mes, asi que a que regiones
+    # contribuyen cada punto puede variar (aclarado abajo con un caption, no
+    # rellenado artificialmente). ANY_VALUE(unidad/equivalencia_kg) alcanza
+    # porque son atributos del producto, no de la region -- deberian repetirse
+    # igual en todas las filas del grupo.
+    df = con.execute(
+        """
+        SELECT f.fecha, AVG(f.precio / f.equivalencia_kg) AS precio,
+               ANY_VALUE(f.unidad) AS unidad, ANY_VALUE(f.equivalencia_kg) AS equivalencia_kg,
+               COUNT(DISTINCT f.region_id) AS num_regiones
+        FROM fact_precios f
+        JOIN dim_producto p ON f.producto_id = p.producto_id
+        JOIN dim_variable v ON f.variable_id = v.variable_id
+        WHERE p.nombre_producto = ?
+          AND v.tipo_mercado = ? AND v.tipo_precio = ?
+          AND f.fecha BETWEEN ? AND ?
+          AND f.precio IS NOT NULL
+        GROUP BY f.fecha
+        ORDER BY f.fecha
+        """,
+        [producto, tipo_mercado, tipo_precio, desde, hasta],
+    ).df()
+else:
+    df = con.execute(
+        """
+        SELECT f.fecha, f.precio / f.equivalencia_kg AS precio, f.unidad, f.equivalencia_kg
+        FROM fact_precios f
+        JOIN dim_producto p ON f.producto_id = p.producto_id
+        JOIN dim_region r ON f.region_id = r.region_id
+        JOIN dim_variable v ON f.variable_id = v.variable_id
+        WHERE p.nombre_producto = ? AND r.nombre_region = ?
+          AND v.tipo_mercado = ? AND v.tipo_precio = ?
+          AND f.fecha BETWEEN ? AND ?
+          AND f.precio IS NOT NULL
+        ORDER BY f.fecha
+        """,
+        [producto, region, tipo_mercado, tipo_precio, desde, hasta],
+    ).df()
 
 st.title(f"{producto}")
 st.markdown(
@@ -543,6 +599,13 @@ st.caption(
     f"En el mercado, {producto.lower()} se vende por unidades de **{unidad_venta}** "
     f"({equivalencia:g} kg cada una)."
 )
+if region == TODO_EL_PERU:
+    st.caption(
+        "🌎 Vista nacional: cada punto es el **promedio simple entre las "
+        "regiones que reportan este producto en esa fecha** — no todas las "
+        "regiones reportan el mismo mes, así que el número de regiones "
+        "detrás de cada punto puede variar."
+    )
 
 # --- KPI: precio actual y si subio o bajo vs el dato anterior ---
 precio_actual = df["precio"].iloc[-1]
@@ -605,7 +668,29 @@ st.caption("▲ rojo = el precio subió · ▼ verde = el precio bajó, en ambos
 # Amazonas: el relleno mostraba una caida continua aunque la linea sí se
 # cortaba). Con trazos separados el relleno tambien se corta de verdad.
 UMBRAL_HUECO_DIAS = 45
-df_linea = df[["fecha", "precio"]].reset_index(drop=True)
+# Un punto por mes (el PROMEDIO de ese mes), no una fila por cada fila de
+# "df" -- df tiene grano diario real para los productos con automatizacion
+# diaria (ver mas abajo, "Ultimos dias"), y graficar eso ACA tal cual metia
+# un racimo denso de ~30 puntos apretados al final de una serie que en el
+# resto de su historia (2021 en adelante) es puramente mensual. Bug real
+# reportado por el usuario 2026-09-10: se veia como un garabato/pico raro
+# pegado al borde derecho del grafico.
+#
+# Se usa PROMEDIO del mes, no el ultimo dato -- probado con Tomate/Lima/
+# Mayorista/Minimo (subida real y gradual de S/1.85 a S/4.63 por kg durante
+# agosto 2026): tomar solo el ultimo dia comprimia toda esa suba gradual en
+# un salto vertical de un mes al siguiente (Jul=50 -> Ago=120 de una), un
+# artefacto visual, no la forma real de la curva. El promedio del mes se ve
+# como una rampa, igual de fiel al dato real y consistente con como ya se
+# interpretan los meses puramente mensuales (para esos, el promedio de 1
+# solo valor es ese mismo valor -- no cambia nada ahi).
+df_linea = (
+    df[["fecha", "precio"]]
+    .assign(anio_mes=df["fecha"].dt.to_period("M"))
+    .groupby("anio_mes", as_index=False)
+    .agg(fecha=("fecha", "max"), precio=("precio", "mean"))
+    .reset_index(drop=True)
+)
 id_tramo = (df_linea["fecha"].diff().dt.days > UMBRAL_HUECO_DIAS).cumsum()
 
 with st.container(border=True):
@@ -621,7 +706,10 @@ with st.container(border=True):
             # ilegible el eje Y (ver dataviz skill, "nunca un bloque saturado")
             fill="tozeroy", fillcolor=f"rgba({COLOR_SERIE_RGB},0.15)",
             showlegend=False, legendgroup="precio", name="Precio",
-            hovertemplate="%{x|%d %b %Y}<br>S/ %{y:.2f}<extra></extra>",
+            # Sin dia -- df_linea ya es un punto por mes (ver arriba), asi
+            # que mostrar el dia exacto sugeriria una precision distinta a
+            # la que tiene el resto de la serie.
+            hovertemplate="%{x|%b %Y}<br>S/ %{y:.2f}<extra></extra>",
         )
         # Puente PUNTEADO entre tramos: una recta solida daria a entender que
         # el precio vario suave durante el hueco (justo lo que este mismo
@@ -660,17 +748,22 @@ with st.container(border=True):
         )
 
 # --- Linea: ultimos dias -- pedido explicito para tener un grafico "por
-# dia, del ultimo mes" ademas del historico mensual de arriba. SISAP solo
-# publica dato DIARIO real para un puñado de productos (papa, arroz,
-# cebolla, tomate, yuca) y SOLO en Lima -- via la automatizacion diaria
-# (cli.py cmd_hoy). El resto del catalogo (y todas las demas regiones) solo
-# tiene el agregado mensual, sin excepcion. Mostrar esto como un grafico
-# vacio para el 95%+ de los productos seria peor que no mostrarlo, asi que
-# se detecta si existe densidad diaria REAL antes de dibujar: una serie
-# puramente mensual nunca tiene 2 fechas distintas en el MISMO mes
-# calendario (cada mes aporta un solo punto, el agregado), asi que
-# encontrar 2+ fechas en un mismo mes es prueba de que hay dato diario de
-# verdad, no solo el agregado cayendo en la ventana.
+# dia, del ultimo mes" ademas del historico mensual de arriba. IMPORTANTE
+# (corregido 2026-09-09/10): el dato diario/sub-mensual real NO es una
+# limitacion pareja de SISAP -- el sitio soporta reporte "Dia"/"Intervalo de
+# Tiempo" para practicamente cualquier producto en varias regiones (Lima,
+# Arequipa, Piura confirmado), aunque no en todas (Cusco no tiene esos dos
+# modos en absoluto, verificado 2026-09-10 -- si tiene "Mensual"). Nuestra
+# automatizacion (cli.py cmd_hoy/cmd_historico, REGIONES_AUTOMATIZADAS)
+# cubre Lima+Arequipa+Cusco+Piura con el catalogo completo -- el resto de
+# las 28 regiones y (en Cusco) todos los productos solo tienen el agregado
+# mensual porque todavia no los recolectamos asi, no porque SISAP no lo
+# publique. Mostrar esto como un grafico vacio para el resto de productos
+# seria peor que no mostrarlo, asi que se detecta si existe densidad diaria
+# REAL antes de dibujar: una serie puramente mensual nunca tiene 2 fechas
+# distintas en el MISMO mes calendario (cada mes aporta un solo punto, el
+# agregado), asi que encontrar 2+ fechas en un mismo mes es prueba de que
+# hay dato diario de verdad, no solo el agregado cayendo en la ventana.
 ultimo_dato = df["fecha"].max()
 ventana_diaria = df[df["fecha"] >= ultimo_dato - pd.Timedelta(days=35)].copy()
 ventana_diaria["anio_mes"] = ventana_diaria["fecha"].dt.to_period("M")
@@ -691,15 +784,28 @@ with st.container(border=True):
             use_container_width=True,
         )
         st.caption(
-            "Dato diario real (no agregado mensual) — solo disponible para un "
-            "grupo reducido de productos en Lima."
+            "Dato diario/sub-mensual real (no agregado mensual) — nuestra "
+            "automatización diaria cubre Lima, Arequipa y Piura (Cusco no "
+            "tiene este tipo de reporte en SISAP). El resto de regiones "
+            "todavía no se recolecta así, no porque SISAP no lo publique."
         )
+        if region == TODO_EL_PERU:
+            st.caption(
+                "🌎 El dato diario real hoy solo existe en Lima, Arequipa y "
+                "Piura -- este tramo del promedio nacional refleja nada más "
+                "las regiones que reportaron ese día específico, que puede "
+                "no ser todas."
+            )
     else:
         st.info(
-            "SISAP no publica dato diario para este producto o región — solo un "
-            "grupo reducido de productos (papa, arroz, cebolla, tomate, yuca) "
-            "tiene esa granularidad, y solo en Lima. El resto del catálogo se "
-            "reporta a nivel mensual (ver 'Evolución histórica' arriba)."
+            "Todavía no recolectamos dato diario para este producto o región "
+            "— nuestra automatización cubre Lima, Arequipa y Piura con el "
+            "catálogo completo (Cusco no tiene reporte diario en SISAP; el "
+            "resto de regiones todavía no se recolecta así). SISAP sí "
+            "publica reporte diario para la mayoría del catálogo en esas "
+            "regiones, simplemente esta combinación puntual no cayó en la "
+            "ventana reciente; mientras tanto, esta página muestra el "
+            "agregado mensual (ver 'Evolución histórica' arriba)."
         )
 
 # --- Barras: comparacion regional (mismo hue: es magnitud, no identidad) ---

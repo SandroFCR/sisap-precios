@@ -209,6 +209,8 @@ ruff check src/ tests/
 - El mapa muestra 25 de 28 regiones como polígonos clicables — Andahuaylas, Chota y Jaén son provincias que SISAP reporta aparte de su departamento, pero no existen como polígono propio en el GeoJSON a nivel departamental; siguen siendo elegibles por el dropdown.
 - Lima y Callao no tienen mercado **mayorista** para varios productos (carnes en particular) — confirmado contra el sitio en vivo, es una característica real de la fuente, no un hueco de scraping.
 - El histórico completo cubre 2021–2026, limitado por lo que SISAP expone en su interfaz.
+- 4 de los 51 géneros del catálogo de SISAP (Aceituna botija, Cerezas, Fresa, Gallo) están listados en el checkbox de productos del sitio pero nunca tienen precio reportado, en ninguna región ni año — confirmado pidiéndolos en vivo contra el sitio (devuelve la página de "sin datos" de SISAP, no un timeout ni un error nuestro). No aparecen en el dropdown de Producto del dashboard porque nunca hay una fila que agregar a `dim_producto`.
+- El dato diario/sub-mensual real (catálogo completo, no solo un puñado de productos) se recolecta en Lima, Arequipa y Piura — **Cusco no tiene reporte "Día" ni "Intervalo de Tiempo" en SISAP en absoluto** (confirmado: falla hasta con 1 solo producto, 1 solo día; el modo "Mensual" sí funciona ahí con normalidad). El resto de las 28 regiones solo tiene el agregado mensual porque todavía no se agregaron a la automatización, no por una limitación de la fuente.
 
 ---
 
