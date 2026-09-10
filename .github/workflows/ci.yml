@@ -1,0 +1,30 @@
+name: CI
+
+"on":
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    # a diferencia de actualizar_datos.yml (que necesita el runner
+    # autohospedado porque MIDAGRI bloquea IPs de datacenter), estos tests
+    # solo leen el duckdb/parquet ya versionados en el repo -- no le pegan
+    # al sitio de SISAP, asi que un runner normal de GitHub alcanza.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar el proyecto (con dependencias de dev)
+        run: pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Tests (pytest)
+        run: pytest -q

@@ -106,10 +106,6 @@ ETIQUETAS_TIPO_PRECIO = {"Mínimo": "Minimo", "Promedio": "Promedio", "Máximo":
 # que el promedio puede variar de a que regiones aportaron ese punto -- se
 # aclara con un caption en vez de tratar de rellenar los huecos.
 TODO_EL_PERU = "Todo el Perú"
-NOMBRES_MES_ABREV = {
-    1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
-    7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic",
-}
 
 st.set_page_config(page_title="Precios SISAP", layout="wide")
 
@@ -623,14 +619,26 @@ with col1, st.container(border=True):
         # badge de tendencia: fondo tenue + texto en color de estado + icono
         # -- nunca solo color, para que no dependa de distinguir verde de
         # rojo (ver dataviz skill, regla de status colors)
+        #
+        # Bug real encontrado 2026-09-10: el "else" trataba delta_pct == 0
+        # igual que una baja (flecha verde ▼), pero el formato "+.1f" le
+        # pone signo positivo igual a un cero exacto -- la combinacion
+        # "▼ +0.0%" se leia contradictoria (flecha de baja, signo de
+        # subida). Un tercer estado neutro (sin flecha ni signo) para
+        # "no cambio" evita la mezcla.
         if delta_pct > 0:
             fondo, texto, flecha, leyenda = "rgba(248,113,113,0.15)", COLOR_MALO, "▲", "vs. periodo anterior"
-        else:
+            texto_pct = f"{delta_pct:+.1f}%"
+        elif delta_pct < 0:
             fondo, texto, flecha, leyenda = "rgba(52,211,153,0.15)", COLOR_BUENO, "▼", "vs. periodo anterior"
+            texto_pct = f"{delta_pct:+.1f}%"
+        else:
+            fondo, texto, flecha, leyenda = "rgba(148,163,184,0.15)", "#94a3b8", "▬", "sin cambio vs. periodo anterior"
+            texto_pct = "0.0%"
         st.markdown(
             f'<span style="background:{fondo};color:{texto};padding:3px 10px;'
             f'border-radius:12px;font-size:0.8rem;font-weight:600;">'
-            f'{flecha} {delta_pct:+.1f}% {leyenda}</span>',
+            f'{flecha} {texto_pct} {leyenda}</span>',
             unsafe_allow_html=True,
         )
 with col2, st.container(border=True):
@@ -809,16 +817,26 @@ with st.container(border=True):
         )
 
 # --- Barras: comparacion regional (mismo hue: es magnitud, no identidad) ---
+# Bug real encontrado 2026-09-10: antes comparaba "f.fecha = MAX(fecha) de
+# TODA la tabla" -- funcionaba mientras todas las regiones compartian el
+# mismo calendario mensual, pero desde que Lima/Arequipa/Piura tienen
+# automatizacion diaria (ver cli.py, REGIONES_AUTOMATIZADAS), el maximo
+# global salto a HOY, y las otras ~24 regiones (que solo reportan mensual,
+# fecha 01 de cada mes) dejaron de calzar con esa fecha exacta -- el
+# grafico se quedaba con 3 barras, no porque el resto no tuviera dato
+# reciente, sino porque no tenian dato EXACTAMENTE ese dia. El fix: cada
+# region usa SU PROPIA fecha mas reciente (QUALIFY + MAX(...) OVER
+# PARTITION BY region), no una fecha compartida.
 comparacion = con.execute(
     """
-    SELECT r.nombre_region, f.precio / f.equivalencia_kg AS precio
+    SELECT r.nombre_region, f.precio / f.equivalencia_kg AS precio, f.fecha
     FROM fact_precios f
     JOIN dim_producto p ON f.producto_id = p.producto_id
     JOIN dim_region r ON f.region_id = r.region_id
     JOIN dim_variable v ON f.variable_id = v.variable_id
     WHERE p.nombre_producto = ? AND v.tipo_mercado = ? AND v.tipo_precio = ?
-      AND f.fecha = (SELECT MAX(fecha) FROM fact_precios WHERE precio IS NOT NULL)
       AND f.precio IS NOT NULL
+    QUALIFY f.fecha = MAX(f.fecha) OVER (PARTITION BY r.nombre_region)
     ORDER BY f.precio DESC
     """,
     [producto, tipo_mercado, tipo_precio],
@@ -830,12 +848,20 @@ with st.container(border=True):
         fig_regiones.add_bar(
             x=comparacion["nombre_region"], y=comparacion["precio"],
             marker_color=COLOR_SERIE, marker_line_width=0,
-            hovertemplate="%{x}<br>S/ %{y:.2f}<extra></extra>",
+            customdata=comparacion["fecha"],
+            # cada barra puede ser de una fecha distinta ahora (ver arriba)
+            # -- mostrarla evita que el usuario asuma que todas son "hoy".
+            hovertemplate="%{x}<br>%{customdata|%d %b %Y}<br>S/ %{y:.2f}<extra></extra>",
         )
         fig_regiones.update_traces(marker={"cornerradius": 4})
         st.plotly_chart(
-            _layout_base(fig_regiones, "Comparación entre regiones (dato más reciente)", "Precio (S/ por kg)"),
+            _layout_base(fig_regiones, "Comparación entre regiones (dato más reciente de cada una)", "Precio (S/ por kg)"),
             use_container_width=True,
+        )
+        st.caption(
+            "Cada región muestra su propio dato más reciente disponible — "
+            "no todas reportan en la misma fecha (pasá el mouse sobre cada "
+            "barra para ver de cuándo es)."
         )
     else:
         st.info(
