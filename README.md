@@ -90,15 +90,24 @@ Un `curl /_stcore/health` confirma que el servidor de Streamlit está vivo — *
 
 Los tests de `test_dashboard.py` usan `streamlit.testing.v1.AppTest`, que simula una sesión real (incluyendo clics en el mapa, envíos de formulario y cambios de widget) y verifica que no haya excepciones — la única forma de atrapar esta clase de bug antes de que un usuario lo vea.
 
+### 7. Expandir la automatización sin asumir que "todas las regiones son iguales"
+
+La automatización diaria (`cmd_hoy`/`cmd_historico`) arrancó pensada para un puñado fijo de productos, solo en Lima — una limitación de nuestro alcance, no del sitio. Al expandirla al catálogo completo en varias regiones, pedir el modo "Intervalo de Tiempo" para Cusco devolvió la misma página de error silenciosa del bug #4, pero por una causa distinta: no era "pedimos demasiado" (particionar productos no cambiaba nada, ni con 1 solo producto), sino que **esa región no tiene ese tipo de reporte en SISAP en absoluto** (el modo "Mensual" sí funciona ahí con normalidad). El reintento ahora diagnostica antes de insistir: prueba con un solo producto primero, y si eso también falla, se rinde para esa región en vez de particionar el catálogo entero contra un error que ninguna partición iba a arreglar.
+
+Un efecto secundario de la misma expansión: el gráfico "Evolución histórica" empezó a anclar cada punto mensual en fechas distintas según si el mes tenía grano diario o no (día 1 vs. día 30), lo que inflaba artificialmente la distancia entre meses consecutivos y activaba el corte de huecos de más de 45 días (pensado para huecos *reales* de reporte, ver sección "El dashboard") donde no correspondía — un mes con dato diario terminaba viéndose desconectado del anterior aunque hubo datos continuos. La fecha de cada punto ahora se ancla siempre al día 1 del mes, sin importar la granularidad real detrás — consistente con cómo ya se interpretaban los meses puramente mensuales.
+
 ---
 
 ## El dashboard
 
 - **Mapa interactivo de Perú** (Plotly + MapLibre, GeoJSON de [geoBoundaries](https://www.geoboundaries.org/), dominio público) — clic para elegir región. Estático a propósito: tras varios intentos de arreglar un parpadeo de zoom que resultó vivir en el renderizado WebGL del navegador (fuera de lo que este código controla), se desactivó el zoom/arrastre en vez de seguir persiguiendo un síntoma que no era arreglable desde Python.
-- **KPIs con sparklines**: precio actual, promedio, mínimo y máximo del periodo, con indicador de tendencia (ícono + color + texto, nunca solo color, para accesibilidad).
-- **Evolución histórica**: la línea y el relleno se **cortan** en huecos reales de más de 45 días (no dibuja una tendencia inventada) y se conectan con una línea punteada tenue — visualmente continuo, honesto sobre qué es dato real.
-- **Variación mensual**: % de cambio contra el último dato real disponible, no contra el mes calendario anterior (un hueco de datos no debe esconder el cambio más grande de la serie).
-- **Comparación regional** y tabla paginada con exportación a CSV.
+- **Selector visual de productos** (fotos reales) debajo del mapa, como atajo a los productos más buscados — no reemplaza el dropdown completo (~125 productos), lo complementa.
+- **Vista "Todo el Perú"**: opción del selector de región que promedia entre todas las regiones que reportan cada fecha, en vez de mirar una sola — con aviso explícito de que no todas reportan el mismo mes.
+- **KPIs con sparklines**: precio actual, promedio, mínimo y máximo del periodo, con indicador de tendencia (ícono + color + texto — nunca solo color, para accesibilidad — y un tercer estado neutro explícito para "sin cambio", no una flecha de baja con signo de subida).
+- **Evolución histórica** (un punto por mes, con barra de rango para navegar arrastrando): la línea y el relleno se **cortan** en huecos reales de más de 45 días (no dibuja una tendencia inventada) y se conectan con una línea punteada tenue — visualmente continuo, honesto sobre qué es dato real. Cada punto mensual es el **promedio** de ese mes, no el último dato — importa para los productos con automatización diaria (ver abajo), donde tomar solo el último día convertía una suba gradual real en un salto vertical falso entre un mes y el siguiente.
+- **Últimos días**: gráfico de grano diario/sub-mensual real (no agregado), para los productos y regiones donde la automatización lo captura así — se detecta automáticamente si existe esa granularidad antes de dibujar, en vez de mostrar un gráfico vacío para el resto del catálogo.
+- **Comparación entre regiones**: cada región muestra su **propio** dato más reciente (no exige que coincida con la fecha global más nueva de la tabla) — necesario desde que algunas regiones reportan a diario y otras solo mensual.
+- Tabla paginada con exportación a CSV.
 - Paleta de colores validada por contraste WCAG y separación para daltonismo (ΔE en espacio OKLab), no elegida a ojo.
 
 ---
@@ -145,6 +154,7 @@ Esquema en estrella en DuckDB, reconstruido completo en cada corrida desde `prec
 | Dashboard | `Streamlit` + `Plotly` | Iteración rápida en Python puro, sin escribir HTML/JS a mano |
 | Testing | `pytest` + `AppTest` | Fixtures de HTML real capturado del sitio, no mocks inventados |
 | Automatización | GitHub Actions (runner **autohospedado**) | MIDAGRI bloquea IPs de datacenter en la nube (confirmado: `ubuntu-latest` de GitHub da `ConnectTimeout`) — la única opción es correr desde una IP residencial |
+| CI | GitHub Actions (`ubuntu-latest`) | `pytest` + `ruff` en cada push/PR — a diferencia del scraper, los tests solo leen el duckdb ya versionado, no le pegan a MIDAGRI, así que no necesitan el runner autohospedado |
 | Lint | `ruff` | Rápido, sin config ceremoniosa |
 
 ---
@@ -161,7 +171,8 @@ src/sisap/
 ├── cli.py           # Comandos: hoy, historico, consultar, poblar-historico, construir-dwh
 ├── dashboard.py      # Streamlit + Plotly
 └── assets/
-    └── peru_regiones.geojson
+    ├── peru_regiones.geojson
+    └── productos/       # fotos del selector visual + CREDITOS.md (licencias por imagen)
 
 tests/
 ├── test_parser.py      # Fixtures de HTML real capturado del sitio
@@ -170,7 +181,8 @@ tests/
 └── test_dashboard.py   # AppTest: simula sesiones reales, no solo health checks
 
 .github/workflows/
-└── actualizar_datos.yml   # Cron diario en runner autohospedado
+├── actualizar_datos.yml   # Cron diario en runner autohospedado (necesita IP residencial)
+└── ci.yml                 # pytest + ruff en cada push/PR, en runner normal de GitHub
 ```
 
 ---
@@ -198,7 +210,7 @@ python -m sisap.cli construir-dwh                           # reconstruye el mod
 ```
 
 ```bash
-pytest -q            # 20 tests
+pytest -q            # 22 tests
 ruff check src/ tests/
 ```
 

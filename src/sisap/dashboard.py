@@ -692,13 +692,25 @@ UMBRAL_HUECO_DIAS = 45
 # como una rampa, igual de fiel al dato real y consistente con como ya se
 # interpretan los meses puramente mensuales (para esos, el promedio de 1
 # solo valor es ese mismo valor -- no cambia nada ahi).
+#
+# La fecha de cada punto SIEMPRE es el dia 1 del mes (anio_mes.start_time),
+# nunca el ultimo dia real -- bug real reportado por el usuario 2026-09-10
+# con Carne de pollo/Lima/Minorista: un mes puramente mensual queda fechado
+# el dia 1, pero un mes con dato diario (la automatizacion nueva) terminaba
+# fechado el dia 30/31 -- la resta entre un "dia 1" y el "dia 31" del mes
+# siguiente da ~60 dias, por encima de UMBRAL_HUECO_DIAS, asi que el
+# detector de huecos (mas abajo) creia que habia un hueco real de 2 meses
+# sin dato y cortaba la linea (sin relleno) donde en realidad hubo datos
+# continuos. Ancorar todo al dia 1 evita el desfasaje -- no cambia el
+# hover (que ya solo muestra mes y año, no el dia).
 df_linea = (
     df[["fecha", "precio"]]
     .assign(anio_mes=df["fecha"].dt.to_period("M"))
     .groupby("anio_mes", as_index=False)
-    .agg(fecha=("fecha", "max"), precio=("precio", "mean"))
-    .reset_index(drop=True)
+    .agg(precio=("precio", "mean"))
 )
+df_linea["fecha"] = df_linea["anio_mes"].dt.start_time
+df_linea = df_linea[["fecha", "precio"]].reset_index(drop=True)
 id_tramo = (df_linea["fecha"].diff().dt.days > UMBRAL_HUECO_DIAS).cumsum()
 
 with st.container(border=True):
