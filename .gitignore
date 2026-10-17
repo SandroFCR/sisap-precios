@@ -12,3 +12,8 @@ __pycache__/
 # ve lo que esta en el repo, no tu disco local.
 data/raw/*
 !data/raw/.gitkeep
+# El warehouse se arma en memoria desde el parquet (ver
+# warehouse.construir_en_memoria): versionarlo sumaba ~5 MB al repo por dia
+# (19 MB, distinto byte a byte en cada corrida). `construir-dwh` lo sigue
+# generando en local para consultas SQL ad hoc.
+data/processed/sisap.duckdb

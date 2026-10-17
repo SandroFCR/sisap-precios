@@ -2,11 +2,18 @@ from pathlib import Path
 
 import duckdb
 
+from sisap.storage import leer_precios
+
 NOMBRES_MES_ES = {
     1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
     7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre",
     12: "Diciembre",
 }
+
+
+class ErrorDeIntegridad(RuntimeError):
+    """El modelo construido no cuadra con su fuente (filas perdidas o
+    multiplicadas por un JOIN, claves duplicadas)."""
 
 
 def construir_modelo_dimensional(ruta_parquet: Path, ruta_duckdb: Path) -> None:
@@ -17,13 +24,41 @@ def construir_modelo_dimensional(ruta_parquet: Path, ruta_duckdb: Path) -> None:
     (el parquet).
     """
     con = duckdb.connect(str(ruta_duckdb))
+    try:
+        construir_en_conexion(con, ruta_parquet)
+    finally:
+        con.close()
 
+
+def construir_en_memoria(ruta_parquet: Path) -> duckdb.DuckDBPyConnection:
+    """El mismo modelo, en memoria. Lo usa el dashboard al arrancar (~1 s
+    con el historico completo): asi el .duckdb (19 MB, distinto byte a byte
+    en cada corrida) ya no tiene que versionarse en git -- era ~90% del
+    crecimiento diario del repo -- y el dashboard nunca puede quedar
+    leyendo un .duckdb desfasado de su parquet."""
+    con = duckdb.connect(":memory:")
+    construir_en_conexion(con, ruta_parquet)
+    return con
+
+
+def construir_en_conexion(con: duckdb.DuckDBPyConnection, ruta_parquet: Path) -> None:
     # capa de staging: el parquet tal cual, sin modelar. Separarla de las
     # tablas finales deja claro que no es parte del esquema en estrella.
-    con.execute(
-        f"CREATE OR REPLACE TABLE staging_precios AS "
-        f"SELECT * FROM read_parquet('{ruta_parquet.as_posix()}')"
-    )
+    # Se lee con leer_precios (no con read_parquet directo en SQL) para que
+    # un parquet de esquema viejo se normalice en UN solo lugar -- y la ruta
+    # nunca se interpola dentro de un string SQL.
+    df_parquet = leer_precios(ruta_parquet)
+    con.register("parquet_normalizado", df_parquet)
+    con.execute("""
+        CREATE OR REPLACE TABLE staging_precios AS
+        SELECT
+            CAST(fecha AS DATE) AS fecha, region, producto, unidad,
+            CAST(equivalencia_kg AS DOUBLE) AS equivalencia_kg, variable,
+            CAST(precio AS DOUBLE) AS precio, periodicidad,
+            CAST(fecha_captura AS DATE) AS fecha_captura
+        FROM parquet_normalizado
+    """)
+    con.unregister("parquet_normalizado")
 
     con.execute("""
         CREATE OR REPLACE TABLE dim_producto AS
@@ -60,10 +95,10 @@ def construir_modelo_dimensional(ruta_parquet: Path, ruta_duckdb: Path) -> None:
         FROM (SELECT DISTINCT variable FROM staging_precios)
     """)
 
-    casos_mes = " ".join(
-        f"WHEN {mes} THEN '{nombre}'" for mes, nombre in NOMBRES_MES_ES.items()
-    )
-    con.execute(f"""
+    # los nombres de mes van como parametro (lista indexada por el numero de
+    # mes), no interpolados en el SQL: ningun string de Python se pega
+    # dentro de una consulta en todo el modulo
+    con.execute("""
         CREATE OR REPLACE TABLE dim_fecha AS
         SELECT
             fecha,
@@ -71,15 +106,15 @@ def construir_modelo_dimensional(ruta_parquet: Path, ruta_duckdb: Path) -> None:
             EXTRACT(month FROM fecha) AS mes,
             EXTRACT(day FROM fecha) AS dia,
             EXTRACT(quarter FROM fecha) AS trimestre,
-            CASE EXTRACT(month FROM fecha) {casos_mes} END AS nombre_mes
+            list_extract(CAST(? AS VARCHAR[]), CAST(EXTRACT(month FROM fecha) AS INTEGER)) AS nombre_mes
         FROM (SELECT DISTINCT fecha FROM staging_precios)
-    """)
+    """, [list(NOMBRES_MES_ES.values())])
 
     con.execute("""
         CREATE OR REPLACE TABLE fact_precios AS
         WITH base AS (
             SELECT
-                p.fecha, r.region_id, pr.producto_id, v.variable_id,
+                p.fecha, r.region_id, pr.producto_id, v.variable_id, p.periodicidad,
                 p.unidad, p.equivalencia_kg, p.precio,
                 p.precio / p.equivalencia_kg AS precio_kg
             FROM staging_precios p
@@ -94,8 +129,11 @@ def construir_modelo_dimensional(ruta_parquet: Path, ruta_duckdb: Path) -> None:
                 LAG(equivalencia_kg) OVER serie AS equiv_anterior,
                 LEAD(equivalencia_kg) OVER serie AS equiv_siguiente
             FROM base
+            -- periodicidad en la particion: la serie diaria y la mensual de un
+            -- mismo producto se evaluan cada una contra SUS vecinos (dias
+            -- contra dias, meses contra meses), nunca mezcladas.
             WINDOW serie AS (
-                PARTITION BY region_id, producto_id, variable_id ORDER BY fecha
+                PARTITION BY region_id, producto_id, variable_id, periodicidad ORDER BY fecha
             )
         ),
         evaluado AS (
@@ -109,7 +147,7 @@ def construir_modelo_dimensional(ruta_parquet: Path, ruta_duckdb: Path) -> None:
             FROM con_vecinos
         )
         SELECT
-            fecha, region_id, producto_id, variable_id, unidad, equivalencia_kg,
+            fecha, region_id, producto_id, variable_id, periodicidad, unidad, equivalencia_kg,
             -- Un mes se anula cuando sus dos vecinos concuerdan entre si
             -- (dentro del 20%, señal de que representan el nivel real y no
             -- estan en medio de su propio cambio de tendencia) Y el precio de
@@ -165,18 +203,62 @@ def construir_modelo_dimensional(ruta_parquet: Path, ruta_duckdb: Path) -> None:
         FROM evaluado
     """)
 
+    # Vista mensual: UN valor por (mes, region, producto, variable), en soles
+    # por kg. Es la base de "Evolucion historica", "Comparacion entre
+    # regiones" y "Todo el Peru" en el dashboard. Se prefiere el agregado
+    # mensual OFICIAL de SISAP -- la misma metodologia para las 28 regiones,
+    # que es lo que hace comparables a Lima (con dato diario) y Puno (solo
+    # mensual) -- y el promedio de los dias solo rellena los meses que
+    # todavia no tienen agregado (ej. el mes en curso antes del refresco
+    # semanal). Antes, el dashboard promediaba juntos el agregado del dia 1
+    # y los ~30 dias del mes: el promedio oficial de todo un mes pesaba lo
+    # mismo que un dia suelto.
+    con.execute("""
+        CREATE OR REPLACE TABLE fact_precios_mensual AS
+        SELECT mes, region_id, producto_id, variable_id, precio_kg, fuente, n_datos
+        FROM (
+            SELECT
+                CAST(DATE_TRUNC('month', fecha) AS DATE) AS mes,
+                region_id, producto_id, variable_id,
+                periodicidad AS fuente,
+                AVG(precio / equivalencia_kg) AS precio_kg,
+                COUNT(*) AS n_datos
+            FROM fact_precios
+            -- isfinite: en DuckDB, NaN > 0 da verdadero
+            WHERE precio IS NOT NULL AND isfinite(equivalencia_kg) AND equivalencia_kg > 0
+            GROUP BY ALL
+        )
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY mes, region_id, producto_id, variable_id
+            ORDER BY (fuente = 'mensual') DESC
+        ) = 1
+    """)
+
     _validar_integridad(con)
-    con.close()
 
 
 def _validar_integridad(con: duckdb.DuckDBPyConnection) -> None:
     """Si un JOIN pierde filas (nombre con espacio extra, etc.) o las
     multiplica (dimension con valores duplicados), fact_precios deja de
     tener exactamente 1 fila por cada fila de staging_precios. Mejor fallar
-    aca que publicar un esquema en estrella silenciosamente roto."""
+    aca que publicar un esquema en estrella silenciosamente roto. (raise
+    explicito, no assert: "python -O" borra los assert.)"""
     filas_staging = con.execute("SELECT COUNT(*) FROM staging_precios").fetchone()[0]
     filas_hechos = con.execute("SELECT COUNT(*) FROM fact_precios").fetchone()[0]
-    assert filas_staging == filas_hechos, (
-        f"fact_precios tiene {filas_hechos} filas pero staging_precios tenia "
-        f"{filas_staging}: algun JOIN esta perdiendo o multiplicando filas."
-    )
+    if filas_staging != filas_hechos:
+        raise ErrorDeIntegridad(
+            f"fact_precios tiene {filas_hechos} filas pero staging_precios tenia "
+            f"{filas_staging}: algun JOIN esta perdiendo o multiplicando filas."
+        )
+    duplicadas = con.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT 1 FROM fact_precios
+            GROUP BY fecha, region_id, producto_id, variable_id, periodicidad
+            HAVING COUNT(*) > 1
+        )
+    """).fetchone()[0]
+    if duplicadas:
+        raise ErrorDeIntegridad(
+            f"{duplicadas} claves (fecha, region, producto, variable, periodicidad) "
+            "repetidas en fact_precios: la deduplicacion de storage.py no se aplico."
+        )

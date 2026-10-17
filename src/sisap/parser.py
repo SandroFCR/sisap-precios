@@ -5,6 +5,16 @@ from bs4 import BeautifulSoup
 from sisap.models import PriceRecord
 
 
+class PaginaDeErrorSisap(ValueError):
+    """SISAP devolvio su pagina de error ("Se ha excedido el tiempo
+    limite...", o la region no tiene ese tipo de reporte) en vez de la
+    tabla de precios. Es una excepcion propia -- no un ValueError suelto --
+    para que los reintentos de cli.py reaccionen SOLO a esto: un precio
+    invalido (ValidationError, que tambien hereda de ValueError) no debe
+    confundirse con "la consulta era muy grande" y disparar particiones de
+    productos que nunca lo van a arreglar."""
+
+
 def parse_resumen_dia(
     html: str, fecha: date, region: str, variables: list[str]
 ) -> list[PriceRecord]:
@@ -25,7 +35,7 @@ def parse_resumen_dia(
     # cli.py) puede hacer que SISAP devuelva la pagina de error en vez de la
     # tabla -- sin este chequeo, quedaria como "0 registros" sin avisar.
     if "mensajeDeError" in html:
-        raise ValueError(
+        raise PaginaDeErrorSisap(
             f"SISAP devolvio una pagina de error en vez de datos (region={region}, "
             f"fecha={fecha}) -- probablemente la consulta es muy grande. Pedi "
             "menos productos a la vez."
@@ -37,16 +47,34 @@ def parse_resumen_dia(
     for fila in soup.select("tr.contenido"):
         celdas = fila.find_all("td")
         producto = celdas[0].get_text(strip=True)
-        unidad = celdas[1].get_text(strip=True)
-        equivalencia_texto = celdas[2].get_text(strip=True)
-        celdas_precio = fila.select("td.numero")
 
-        try:
-            equivalencia_kg = float(equivalencia_texto)
-        except ValueError:
-            equivalencia_kg = float("nan")
+        # Cada grupo de variables (mayorista, minorista) trae SU PROPIO par
+        # "Unidad de medida"/"Equiv." justo antes de sus celdas de precio.
+        # Bug real encontrado 2026-10-17: se usaba el par del primer grupo
+        # para todas las variables. Aji rocoto/Lima se vende al por mayor en
+        # "Cajon" (18 kg) y al por menor en "Kilogramo": el precio minorista
+        # (S/ 13 por kg) quedaba dividido entre 18 -- S/ 0.72 por kg. Y un
+        # producto sin mayorista (Carne de pollo eviscerado) dejaba sus
+        # precios minoristas con unidad vacia y equivalencia NaN, inutiles.
+        # Ahora cada celda de precio toma el ultimo par unidad/equivalencia
+        # que aparecio antes que ella en la fila.
+        unidad, equivalencia_kg = "", float("nan")
+        no_numericas: list[str] = []
+        celdas_precio = []
+        for celda in celdas[1:]:
+            if "numero" in (celda.get("class") or []):
+                if len(no_numericas) >= 2:
+                    unidad = no_numericas[-2]
+                    try:
+                        equivalencia_kg = float(no_numericas[-1])
+                    except ValueError:
+                        equivalencia_kg = float("nan")
+                no_numericas = []
+                celdas_precio.append((celda, unidad, equivalencia_kg))
+            else:
+                no_numericas.append(celda.get_text(strip=True))
 
-        for variable, celda in zip(variables, celdas_precio):
+        for variable, (celda, unidad, equivalencia_kg) in zip(variables, celdas_precio):
             texto_precio = celda.get_text(strip=True)
             precio = _parsear_precio(texto_precio)
             registros.append(
@@ -58,6 +86,7 @@ def parse_resumen_dia(
                     equivalencia_kg=equivalencia_kg,
                     variable=variable,
                     precio=precio,
+                    periodicidad="dia",
                 )
             )
 
@@ -103,7 +132,7 @@ def parse_resumen_intervalo(
     # registros" sin ningun aviso -- Cusco se hubiera quedado sin dato de
     # intervalo por completo, en silencio. Mismo fix: fallar fuerte.
     if "mensajeDeError" in html:
-        raise ValueError(
+        raise PaginaDeErrorSisap(
             f"SISAP devolvio una pagina de error en vez de datos (region={region}, "
             f"variable={variable}) -- probablemente la consulta es muy grande. "
             "Pedi menos productos o un rango mas chico a la vez."
@@ -119,10 +148,13 @@ def parse_resumen_intervalo(
         for celda_precio in fila.select("td.numero"):
             if not celda_precio.get("rel"):
                 texto = celda_precio.get_text(strip=True)
-                assert not texto, (
-                    f"Celda td.numero sin rel pero con texto {texto!r}: "
-                    "supuesto de parseo invalido, revisar HTML fuente."
-                )
+                # raise explicito, no assert: "python -O" borra los assert,
+                # y esta es justo la red que evita perder datos en silencio.
+                if texto:
+                    raise ValueError(
+                        f"Celda td.numero sin rel pero con texto {texto!r}: "
+                        "supuesto de parseo invalido, revisar HTML fuente."
+                    )
                 continue
 
             _, _, columna = celda_precio["rel"].partition("~")
@@ -147,6 +179,7 @@ def parse_resumen_intervalo(
                     equivalencia_kg=equivalencia_kg,
                     variable=variable,
                     precio=precio,
+                    periodicidad="dia",
                 )
             )
 
@@ -187,7 +220,7 @@ def parse_resumen_mensual(
     # se quedo con 14 productos minoristas en vez de ~85 durante meses por
     # esto. Fallar fuerte y claro aca evita que se repita en silencio.
     if "mensajeDeError" in html:
-        raise ValueError(
+        raise PaginaDeErrorSisap(
             f"SISAP devolvio una pagina de error en vez de datos (region={region}, "
             f"variable={variable}) -- probablemente la consulta es muy grande. "
             "Pedi menos anios o menos productos a la vez."
@@ -231,6 +264,7 @@ def parse_resumen_mensual(
                     equivalencia_kg=equivalencia_actual,
                     variable=variable,
                     precio=_parsear_precio(celda.get_text(strip=True)),
+                    periodicidad="mensual",
                 )
             )
 

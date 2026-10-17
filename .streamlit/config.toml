@@ -4,3 +4,12 @@ backgroundColor = "#0d1b2a"
 secondaryBackgroundColor = "#16283d"
 textColor = "#e8eef4"
 primaryColor = "#22d3ee"
+
+[client]
+# El default ("full") muestra a CUALQUIER visitante el traceback completo de
+# una excepcion: rutas del servidor, nombres de archivo, fragmentos de SQL.
+# "type" solo muestra el tipo de error; el detalle queda en los logs.
+showErrorDetails = "type"
+
+[browser]
+gatherUsageStats = false

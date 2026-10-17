@@ -3,6 +3,13 @@ from datetime import date
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+# HTTP a secas, no HTTPS: el servidor de MIDAGRI no completa el handshake
+# TLS (probado 2026-10-17: SSLV3_ALERT_HANDSHAKE_FAILURE con un cliente
+# moderno). Riesgo aceptado y acotado: es informacion publica (no se manda
+# nada sensible), no se siguen redirects (httpx no los sigue por defecto y
+# raise_for_status falla ante un 3xx, asi que una respuesta manipulada no
+# puede mandarnos a otro host), y todo lo que llega pasa por la validacion
+# de PriceRecord antes de guardarse.
 BASE_URL = "http://sistemas.midagri.gob.pe/sisap/portal2/ciudades"
 USER_AGENT = "sisap-precios-portfolio/0.1 (proyecto educativo, no comercial)"
 
@@ -60,10 +67,12 @@ def fetch_resumen_mensual(
     region: str,
     productos: list[str],
     variable: str,
+    meses: list[int] | None = None,
 ) -> str:
-    """Trae varios anios completos (12 meses c/u) en una sola peticion (modo
-    'Mensual'). Para series largas es muchisimo mas eficiente que pedir mes
-    a mes o dia a dia: 6 anios = 1 request en vez de ~72."""
+    """Trae varios anios (12 meses c/u, o solo `meses`) en una sola peticion
+    (modo 'Mensual'). Para series largas es muchisimo mas eficiente que pedir
+    mes a mes o dia a dia: 6 anios = 1 request en vez de ~72. Para refrescar
+    solo el mes en curso, `meses` evita volver a bajar el anio entero."""
     hoy_str = date.today().strftime("%d/%m/%Y")
     params = [
         ("region", region),
@@ -74,7 +83,7 @@ def fetch_resumen_mensual(
         ("__ajax_carga_final", "consulta"),
     ]
     params += [("productos[]", producto) for producto in productos]
-    params += [("meses[]", f"{mes:02d}") for mes in range(1, 13)]
+    params += [("meses[]", f"{mes:02d}") for mes in (meses or range(1, 13))]
     params += [("anios[]", str(anio)) for anio in anios]
     params.append(("variables[]", variable))
 

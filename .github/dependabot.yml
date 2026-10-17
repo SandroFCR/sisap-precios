@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # requirements.txt fija versiones exactas (lo que instala Streamlit
+  # Cloud): Dependabot propone las actualizaciones como PR, y CI las prueba
+  # antes de que lleguen al dashboard publicado
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      dependencias:
+        patterns: ["*"]
+
+  # las actions estan fijadas por SHA de commit (no por tag movible)
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly

@@ -11,14 +11,25 @@ name: Actualizar datos SISAP
 permissions:
   contents: write  # el token por defecto es de solo lectura; hace falta esto para poder comitear
 
+# nunca dos corridas a la vez (ej. una manual encima de la programada):
+# las dos reescribirian y commitearian el mismo parquet
+concurrency:
+  group: actualizar-datos
+  cancel-in-progress: false
+
 jobs:
   actualizar:
     # runner autohospedado (en la PC de Sandro, IP residencial): el sitio de
     # MIDAGRI bloquea las conexiones desde IPs de datacenter en la nube
     # (probado: ubuntu-latest de GitHub daba ConnectTimeout).
+    #
+    # SEGURIDAD: este workflow NUNCA debe dispararse con pull_request -- en
+    # un repo publico, eso correria codigo de cualquier fork en la PC del
+    # runner (tests/test_seguridad.py lo verifica).
     runs-on: [self-hosted, windows, sisap]
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: Preferir el bash de Git al de WSL
         # "shell: bash" resuelve por PATH, y en este runner encuentra primero
@@ -36,10 +47,33 @@ jobs:
       - name: Instalar el proyecto
         run: pip install -e .
 
-      - name: Traer los precios de hoy
-        run: python -m sisap.cli hoy
+      # Los pasos de scraping tienen continue-on-error: si uno falla (SISAP
+      # caido, un dato invalido), lo que SI se trajo igual se commitea, y el
+      # ultimo paso pone la corrida en rojo para que llegue el aviso.
+      - name: Traer el dato diario de la ultima semana (incluye hoy)
+        # Antes era 'hoy' (modo "Dia", solo la fecha de hoy). Bugs reales
+        # encontrados 2026-10-17: (1) un dia con el runner apagado se perdia
+        # para siempre (paso 6 veces entre sep y oct); (2) SISAP sigue
+        # corrigiendo el dato de un dia despues de publicarlo (165 de 402
+        # precios de Lima del 14-sep cambiaron), y la captura de la mañana
+        # quedaba congelada; (3) el modo "Intervalo" es el que cuadra con el
+        # agregado mensual oficial (promedio: 0.0% de error mediano vs 1.8%
+        # del modo "Dia"). Re-pedir la ultima semana en modo Intervalo
+        # resuelve las tres cosas, y todo el dato diario sale de UNA fuente.
+        id: diario
+        continue-on-error: true
+        run: python -m sisap.cli historico --ultimos-dias 7
 
-      - name: Reconstruir el modelo dimensional
+      - name: Refrescar el agregado mensual (si pasaron 6+ dias)
+        # ~168 pedidos: se paga ~1 vez por semana, aunque el runner haya
+        # estado apagado justo el dia "que tocaba"
+        id: mensual
+        continue-on-error: true
+        run: python -m sisap.cli refrescar-mensual --meses 2 --solo-si-pasaron-dias 6
+
+      - name: Validar el modelo dimensional
+        # el dashboard arma el modelo en memoria; esto solo verifica que se
+        # pueda construir (integridad referencial) antes de publicar
         run: python -m sisap.cli construir-dwh
 
       - name: Comitear los datos actualizados
@@ -47,6 +81,18 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/processed/precios.parquet data/processed/sisap.duckdb
+          git add data/processed/precios.parquet
           git diff --staged --quiet || git commit -m "Actualizar datos SISAP $(date -u +%Y-%m-%d)"
+          # si alguien pusheo codigo mientras corria el scraping, el push
+          # directo se rechazaria
+          git pull --rebase
           git push
+
+      - name: Alarma de frescura
+        run: python -m sisap.cli verificar-frescura
+
+      - name: Marcar la corrida en rojo si un paso de scraping fallo
+        if: steps.diario.outcome == 'failure' || steps.mensual.outcome == 'failure'
+        run: |
+          echo "Fallo algun paso de scraping (ver logs arriba): diario=${{ steps.diario.outcome }} mensual=${{ steps.mensual.outcome }}"
+          exit 1

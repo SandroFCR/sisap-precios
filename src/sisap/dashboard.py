@@ -1,5 +1,8 @@
 import base64
+import html
 import json
+import os
+import sys
 from pathlib import Path
 
 import duckdb
@@ -7,7 +10,17 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-RUTA_DUCKDB = Path("data/processed/sisap.duckdb")
+# Streamlit Cloud corre este archivo como script suelto, sin instalar el
+# paquete (requirements.txt solo trae las dependencias): se agrega src/ al
+# path para poder reusar warehouse.py en vez de duplicar su logica.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from sisap.sanitizar import csv_sin_formulas, escapar_markdown, nombre_de_archivo
+from sisap.warehouse import construir_en_memoria
+
+# El modelo se arma en memoria desde el parquet (la unica fuente de verdad
+# versionada) -- ver warehouse.construir_en_memoria. SISAP_PARQUET permite
+# apuntar el dashboard a otro archivo (lo usan los tests de seguridad).
+RUTA_PARQUET = Path(os.environ.get("SISAP_PARQUET", "data/processed/precios.parquet"))
 RUTA_GEOJSON = Path(__file__).parent / "assets" / "peru_regiones.geojson"
 
 # El geojson (geoBoundaries, dominio publico) trae las 24 regiones + El
@@ -152,9 +165,27 @@ st.markdown(
 )
 
 
-@st.cache_resource
+@st.cache_resource(max_entries=2)
+def _modelo_en_memoria(ruta_parquet: str, version: float) -> duckdb.DuckDBPyConnection:
+    """Un modelo por proceso, reconstruido solo cuando cambia el parquet:
+    `version` es su fecha de modificacion, asi que cuando el bot commitea
+    datos nuevos y Streamlit Cloud hace pull, la siguiente sesion arma el
+    modelo nuevo sola (antes, la conexion cacheada seguia leyendo el
+    .duckdb viejo hasta que se reiniciara la app)."""
+    return construir_en_memoria(Path(ruta_parquet))
+
+
 def conectar() -> duckdb.DuckDBPyConnection:
-    return duckdb.connect(str(RUTA_DUCKDB), read_only=True)
+    # .cursor(): una conexion DuckDB no es segura para usarse desde varios
+    # hilos a la vez, y Streamlit corre cada sesion en su propio hilo. El
+    # cursor comparte la misma base en memoria con su propio estado.
+    modelo = _modelo_en_memoria(str(RUTA_PARQUET), RUTA_PARQUET.stat().st_mtime)
+    return modelo.cursor()
+
+
+# Texto que viene de SISAP (nombres de producto, unidades) se muestra en
+# widgets que interpretan Markdown (st.title, st.caption) -- ver sanitizar.py
+_md = escapar_markdown
 
 
 def _opciones(con: duckdb.DuckDBPyConnection, sql: str) -> list[str]:
@@ -212,10 +243,10 @@ def _layout_base(fig: go.Figure, titulo: str, titulo_y: str) -> go.Figure:
     return fig
 
 
-if not RUTA_DUCKDB.exists():
+if not RUTA_PARQUET.exists():
     st.error(
-        f"No existe {RUTA_DUCKDB}. Corre primero:\n\n"
-        "`python -m sisap.cli construir-dwh`"
+        f"No existe {RUTA_PARQUET}. Corre primero:\n\n"
+        "`python -m sisap.cli poblar-historico --desde-anio 2021 --hasta-anio 2026`"
     )
     st.stop()
 
@@ -336,7 +367,7 @@ fig_mapa.update_layout(
 with st.sidebar.container(border=True):
     st.caption("Clic en el mapa para elegir región")
     st.plotly_chart(
-        fig_mapa, on_select="rerun", key="mapa_regiones", use_container_width=True,
+        fig_mapa, on_select="rerun", key="mapa_regiones", width="stretch",
         config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
     )
 
@@ -391,7 +422,7 @@ with st.sidebar.container(border=True):
     columnas_destacados = st.columns(2)
     for indice, (archivo, etiqueta, palabra_clave) in enumerate(PRODUCTOS_DESTACADOS):
         with columnas_destacados[indice % 2]:
-            st.image(str(RUTA_PRODUCTOS_DESTACADOS / archivo), use_container_width=True)
+            st.image(str(RUTA_PRODUCTOS_DESTACADOS / archivo), width="stretch")
             # Bug real encontrado 2026-09-08: un st.rerun() aca (antes de
             # llegar al selectbox de Región, mas abajo en el script) le
             # gana de mano a Streamlit -- si el script se aborta antes de
@@ -403,7 +434,7 @@ with st.sidebar.container(border=True):
             # solo (como cualquier widget) -- no hace falta un rerun propio,
             # solo dejar que el script siga su curso normal hasta el final,
             # donde el selectbox si lee el session_state ya actualizado.
-            if st.button(etiqueta, key=f"btn_destacado_{palabra_clave}", use_container_width=True):
+            if st.button(etiqueta, key=f"btn_destacado_{palabra_clave}", width="stretch"):
                 coincidencia = next(
                     (p for p in productos_de_la_region if palabra_clave in p.lower()), None
                 )
@@ -503,7 +534,7 @@ with st.container(border=True):
             # widgets (que tienen una etiqueta arriba ocupando esa altura)
             st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
             aplicar = st.form_submit_button(
-                "Aplicar filtros", type="primary", use_container_width=True
+                "Aplicar filtros", type="primary", width="stretch"
             )
 
 desde, hasta = rango if len(rango) == 2 else (fecha_min, fecha_max)
@@ -523,16 +554,16 @@ etiqueta_precio, tipo_precio = filtros_aplicados["etiqueta_precio"], filtros_apl
 desde, hasta = filtros_aplicados["desde"], filtros_aplicados["hasta"]
 
 if region == TODO_EL_PERU:
-    # Promedio nacional simple: una fila por fecha, promediando entre TODAS
-    # las regiones que reportan ese producto/mercado/tipo_precio ese dia --
-    # no todas las regiones reportan el mismo mes, asi que a que regiones
-    # contribuyen cada punto puede variar (aclarado abajo con un caption, no
-    # rellenado artificialmente). ANY_VALUE(unidad/equivalencia_kg) alcanza
-    # porque son atributos del producto, no de la region -- deberian repetirse
-    # igual en todas las filas del grupo.
+    # Promedio nacional simple: una fila por fecha (y granularidad),
+    # promediando entre TODAS las regiones que reportan ese producto/mercado/
+    # tipo_precio ese dia -- no todas las regiones reportan el mismo mes, asi
+    # que a que regiones contribuyen cada punto puede variar (aclarado abajo
+    # con un caption, no rellenado artificialmente). ANY_VALUE(unidad/
+    # equivalencia_kg) alcanza porque son atributos del producto, no de la
+    # region -- deberian repetirse igual en todas las filas del grupo.
     df = con.execute(
         """
-        SELECT f.fecha, AVG(f.precio / f.equivalencia_kg) AS precio,
+        SELECT f.fecha, f.periodicidad, AVG(f.precio / f.equivalencia_kg) AS precio,
                ANY_VALUE(f.unidad) AS unidad, ANY_VALUE(f.equivalencia_kg) AS equivalencia_kg,
                COUNT(DISTINCT f.region_id) AS num_regiones
         FROM fact_precios f
@@ -542,15 +573,37 @@ if region == TODO_EL_PERU:
           AND v.tipo_mercado = ? AND v.tipo_precio = ?
           AND f.fecha BETWEEN ? AND ?
           AND f.precio IS NOT NULL
-        GROUP BY f.fecha
-        ORDER BY f.fecha
+        GROUP BY f.fecha, f.periodicidad
+        ORDER BY f.fecha, f.periodicidad
+        """,
+        [producto, tipo_mercado, tipo_precio, desde, hasta],
+    ).df()
+    # Serie mensual: el promedio entre regiones del agregado mensual OFICIAL
+    # de cada una (ver warehouse.py, fact_precios_mensual) -- cada region
+    # aporta UN numero por mes. Sin el relleno con promedio diario: bug
+    # real encontrado 2026-10-17, con el mes en curso todavia sin agregado,
+    # el "octubre nacional" salia de solo las 3 regiones con dato diario y
+    # el KPI lo comparaba contra un septiembre de 28 (Tomate/Mayorista/
+    # Minimo: "-10.3% vs. mes anterior", un artefacto de que regiones
+    # entraban al promedio, no del precio).
+    df_mensual = con.execute(
+        """
+        SELECT m.mes AS fecha, AVG(m.precio_kg) AS precio, COUNT(DISTINCT m.region_id) AS num_regiones
+        FROM fact_precios_mensual m
+        JOIN dim_producto p ON m.producto_id = p.producto_id
+        JOIN dim_variable v ON m.variable_id = v.variable_id
+        WHERE p.nombre_producto = ? AND v.tipo_mercado = ? AND v.tipo_precio = ?
+          AND m.fuente = 'mensual'
+          AND m.mes BETWEEN DATE_TRUNC('month', CAST(? AS DATE)) AND ?
+        GROUP BY m.mes
+        ORDER BY m.mes
         """,
         [producto, tipo_mercado, tipo_precio, desde, hasta],
     ).df()
 else:
     df = con.execute(
         """
-        SELECT f.fecha, f.precio / f.equivalencia_kg AS precio, f.unidad, f.equivalencia_kg
+        SELECT f.fecha, f.periodicidad, f.precio / f.equivalencia_kg AS precio, f.unidad, f.equivalencia_kg
         FROM fact_precios f
         JOIN dim_producto p ON f.producto_id = p.producto_id
         JOIN dim_region r ON f.region_id = r.region_id
@@ -559,19 +612,33 @@ else:
           AND v.tipo_mercado = ? AND v.tipo_precio = ?
           AND f.fecha BETWEEN ? AND ?
           AND f.precio IS NOT NULL
-        ORDER BY f.fecha
+        ORDER BY f.fecha, f.periodicidad
+        """,
+        [producto, region, tipo_mercado, tipo_precio, desde, hasta],
+    ).df()
+    df_mensual = con.execute(
+        """
+        SELECT m.mes AS fecha, m.precio_kg AS precio, m.fuente
+        FROM fact_precios_mensual m
+        JOIN dim_producto p ON m.producto_id = p.producto_id
+        JOIN dim_region r ON m.region_id = r.region_id
+        JOIN dim_variable v ON m.variable_id = v.variable_id
+        WHERE p.nombre_producto = ? AND r.nombre_region = ?
+          AND v.tipo_mercado = ? AND v.tipo_precio = ?
+          AND m.mes BETWEEN DATE_TRUNC('month', CAST(? AS DATE)) AND ?
+        ORDER BY m.mes
         """,
         [producto, region, tipo_mercado, tipo_precio, desde, hasta],
     ).df()
 
-st.title(f"{producto}")
+st.title(_md(producto))
 st.markdown(
     f"<span style='color:{TEXTO};opacity:0.7;font-size:1.1rem;'>"
-    f"{tipo_mercado} · {etiqueta_precio} · {region}</span>",
+    f"{html.escape(tipo_mercado)} · {html.escape(etiqueta_precio)} · {html.escape(region)}</span>",
     unsafe_allow_html=True,
 )
 
-if df.empty:
+if df.empty or df_mensual.empty:
     # El mensaje no asume cual de los dos (mayorista/minorista) es el que
     # falta -- SISAP puede no tener cualquiera de los dos segun la region
     # (ej. Lima y Callao no tienen mercado mayorista de carnes, pero si
@@ -588,11 +655,13 @@ if df.empty:
     st.stop()
 
 df["fecha"] = pd.to_datetime(df["fecha"])
+df_mensual["fecha"] = pd.to_datetime(df_mensual["fecha"])
+df_diario = df[df["periodicidad"] == "dia"]
 unidad_venta = df["unidad"].iloc[-1]
 equivalencia = df["equivalencia_kg"].iloc[-1]
 st.caption(
     f"Todos los precios de esta página están normalizados a **soles por kilogramo**. "
-    f"En el mercado, {producto.lower()} se vende por unidades de **{unidad_venta}** "
+    f"En el mercado, {_md(producto.lower())} se vende por unidades de **{_md(unidad_venta)}** "
     f"({equivalencia:g} kg cada una)."
 )
 if region == TODO_EL_PERU:
@@ -603,18 +672,46 @@ if region == TODO_EL_PERU:
         "detrás de cada punto puede variar."
     )
 
+MESES_CORTOS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "set", "oct", "nov", "dic"]
+
+
+def _fecha_corta(fecha: pd.Timestamp, con_dia: bool) -> str:
+    # a mano y no con strftime("%b"): %b depende del locale del servidor
+    # (en Streamlit Cloud sale en ingles)
+    mes_anio = f"{MESES_CORTOS[fecha.month - 1]} {fecha.year}"
+    return f"{fecha.day} {mes_anio}" if con_dia else mes_anio
+
+
 # --- KPI: precio actual y si subio o bajo vs el dato anterior ---
-precio_actual = df["precio"].iloc[-1]
+# El dato mas fresco, con la granularidad mas fina que haya: el ultimo dia
+# si la region tiene dato diario en el rango, si no el ultimo mes. Antes era
+# "la ultima fila", que con las dos granularidades mezcladas podia comparar
+# el promedio de un mes entero contra un dia suelto. "Todo el Peru" usa
+# siempre el mensual: el diario nacional solo promedia las pocas regiones
+# con automatizacion diaria, no el pais.
+usar_diario = region != TODO_EL_PERU and not df_diario.empty
+serie_actual = df_diario if usar_diario else df_mensual
+precio_actual = serie_actual["precio"].iloc[-1]
+fecha_actual = serie_actual["fecha"].iloc[-1]
 delta_pct = None
-if len(df) >= 2:
-    precio_anterior = df["precio"].iloc[-2]
+if len(serie_actual) >= 2:
+    precio_anterior = serie_actual["precio"].iloc[-2]
     if precio_anterior:
         delta_pct = (precio_actual - precio_anterior) / precio_anterior * 100
+referencia = "vs. dato anterior" if usar_diario else "vs. mes anterior"
 
 col1, col2, col3, col4 = st.columns(4)
 with col1, st.container(border=True):
-    st.caption("PRECIO ACTUAL ⓘ", help="Último dato dentro del rango elegido")
+    st.caption(
+        "PRECIO ACTUAL ⓘ",
+        help="Último dato diario dentro del rango elegido" if usar_diario
+        else "Último promedio mensual dentro del rango elegido",
+    )
     st.markdown(f"### S/ {precio_actual:.2f}")
+    detalle = "dato diario" if usar_diario else "promedio mensual"
+    if region == TODO_EL_PERU:
+        detalle += f" de {int(serie_actual['num_regiones'].iloc[-1])} regiones"
+    st.caption(f"{_fecha_corta(fecha_actual, con_dia=usar_diario)} · {detalle}")
     if delta_pct is not None:
         # badge de tendencia: fondo tenue + texto en color de estado + icono
         # -- nunca solo color, para que no dependa de distinguir verde de
@@ -627,13 +724,13 @@ with col1, st.container(border=True):
         # subida). Un tercer estado neutro (sin flecha ni signo) para
         # "no cambio" evita la mezcla.
         if delta_pct > 0:
-            fondo, texto, flecha, leyenda = "rgba(248,113,113,0.15)", COLOR_MALO, "▲", "vs. periodo anterior"
+            fondo, texto, flecha, leyenda = "rgba(248,113,113,0.15)", COLOR_MALO, "▲", referencia
             texto_pct = f"{delta_pct:+.1f}%"
         elif delta_pct < 0:
-            fondo, texto, flecha, leyenda = "rgba(52,211,153,0.15)", COLOR_BUENO, "▼", "vs. periodo anterior"
+            fondo, texto, flecha, leyenda = "rgba(52,211,153,0.15)", COLOR_BUENO, "▼", referencia
             texto_pct = f"{delta_pct:+.1f}%"
         else:
-            fondo, texto, flecha, leyenda = "rgba(148,163,184,0.15)", "#94a3b8", "▬", "sin cambio vs. periodo anterior"
+            fondo, texto, flecha, leyenda = "rgba(148,163,184,0.15)", "#94a3b8", "▬", f"sin cambio {referencia}"
             texto_pct = "0.0%"
         st.markdown(
             f'<span style="background:{fondo};color:{texto};padding:3px 10px;'
@@ -641,26 +738,30 @@ with col1, st.container(border=True):
             f'{flecha} {texto_pct} {leyenda}</span>',
             unsafe_allow_html=True,
         )
+# Promedio/minimo/maximo sobre la serie MENSUAL (la misma de "Evolucion
+# historica"): con las filas crudas, una region con dato diario sumaba ~30
+# puntos por mes y otra solo 1, y el "minimo" de Lima era el de un dia
+# suelto mientras el de Puno era el de un mes entero -- no comparables.
 with col2, st.container(border=True):
-    st.caption("PROMEDIO PERIODO ⓘ", help="Promedio de todo el rango de fechas elegido")
-    st.markdown(f"### S/ {df['precio'].mean():.2f}")
+    st.caption("PROMEDIO PERIODO ⓘ", help="Promedio de los valores mensuales dentro del rango elegido")
+    st.markdown(f"### S/ {df_mensual['precio'].mean():.2f}")
     st.plotly_chart(
-        _sparkline(df, COLOR_SERIE), use_container_width=True,
+        _sparkline(df_mensual, COLOR_SERIE), width="stretch",
         config={"displayModeBar": False}, key="spark_promedio",
     )
 with col3, st.container(border=True):
-    st.caption("MÍNIMO PERIODO ⓘ", help="Precio más bajo dentro del rango elegido (marcado en la línea)")
-    st.markdown(f"### S/ {df['precio'].min():.2f}")
+    st.caption("MÍNIMO PERIODO ⓘ", help="Mes más barato dentro del rango elegido (marcado en la línea)")
+    st.markdown(f"### S/ {df_mensual['precio'].min():.2f}")
     st.plotly_chart(
-        _sparkline(df, COLOR_BUENO, df.loc[df["precio"].idxmin(), "fecha"]),
-        use_container_width=True, config={"displayModeBar": False}, key="spark_minimo",
+        _sparkline(df_mensual, COLOR_BUENO, df_mensual.loc[df_mensual["precio"].idxmin(), "fecha"]),
+        width="stretch", config={"displayModeBar": False}, key="spark_minimo",
     )
 with col4, st.container(border=True):
-    st.caption("MÁXIMO PERIODO ⓘ", help="Precio más alto dentro del rango elegido (marcado en la línea)")
-    st.markdown(f"### S/ {df['precio'].max():.2f}")
+    st.caption("MÁXIMO PERIODO ⓘ", help="Mes más caro dentro del rango elegido (marcado en la línea)")
+    st.markdown(f"### S/ {df_mensual['precio'].max():.2f}")
     st.plotly_chart(
-        _sparkline(df, COLOR_MALO, df.loc[df["precio"].idxmax(), "fecha"]),
-        use_container_width=True, config={"displayModeBar": False}, key="spark_maximo",
+        _sparkline(df_mensual, COLOR_MALO, df_mensual.loc[df_mensual["precio"].idxmax(), "fecha"]),
+        width="stretch", config={"displayModeBar": False}, key="spark_maximo",
     )
 
 st.caption("▲ rojo = el precio subió · ▼ verde = el precio bajó, en ambos gráficos de abajo")
@@ -703,14 +804,12 @@ UMBRAL_HUECO_DIAS = 45
 # sin dato y cortaba la linea (sin relleno) donde en realidad hubo datos
 # continuos. Ancorar todo al dia 1 evita el desfasaje -- no cambia el
 # hover (que ya solo muestra mes y año, no el dia).
-df_linea = (
-    df[["fecha", "precio"]]
-    .assign(anio_mes=df["fecha"].dt.to_period("M"))
-    .groupby("anio_mes", as_index=False)
-    .agg(precio=("precio", "mean"))
-)
-df_linea["fecha"] = df_linea["anio_mes"].dt.start_time
-df_linea = df_linea[["fecha", "precio"]].reset_index(drop=True)
+#
+# Desde 2026-10-17 este agregado lo arma warehouse.py (fact_precios_mensual,
+# ya fechado el dia 1): el agregado OFICIAL de SISAP cuando existe, y el
+# promedio de los dias solo para los meses que todavia no lo tienen. Antes
+# se promediaba aca el agregado del dia 1 junto con los ~30 dias del mes.
+df_linea = df_mensual[["fecha", "precio"]].reset_index(drop=True)
 id_tramo = (df_linea["fecha"].diff().dt.days > UMBRAL_HUECO_DIAS).cumsum()
 
 with st.container(border=True):
@@ -758,7 +857,7 @@ with st.container(border=True):
             "bgcolor": FONDO_TARJETA, "bordercolor": GRID, "borderwidth": 1,
         },
     )
-    st.plotly_chart(fig_linea, use_container_width=True)
+    st.plotly_chart(fig_linea, width="stretch")
     num_tramos = id_tramo.nunique()
     if num_tramos > 1:
         st.caption(
@@ -766,6 +865,7 @@ with st.container(border=True):
             "sin dato en este rango — la línea punteada solo conecta visualmente "
             "los tramos, no representa una tendencia real."
         )
+
 
 # --- Linea: ultimos dias -- pedido explicito para tener un grafico "por
 # dia, del ultimo mes" ademas del historico mensual de arriba. IMPORTANTE
@@ -775,81 +875,88 @@ with st.container(border=True):
 # Arequipa, Piura confirmado), aunque no en todas (Cusco no tiene esos dos
 # modos en absoluto, verificado 2026-09-10 -- si tiene "Mensual"). Nuestra
 # automatizacion (cli.py cmd_hoy/cmd_historico, REGIONES_AUTOMATIZADAS)
-# cubre Lima+Arequipa+Cusco+Piura con el catalogo completo -- el resto de
-# las 28 regiones y (en Cusco) todos los productos solo tienen el agregado
-# mensual porque todavia no los recolectamos asi, no porque SISAP no lo
-# publique. Mostrar esto como un grafico vacio para el resto de productos
-# seria peor que no mostrarlo, asi que se detecta si existe densidad diaria
-# REAL antes de dibujar: una serie puramente mensual nunca tiene 2 fechas
-# distintas en el MISMO mes calendario (cada mes aporta un solo punto, el
-# agregado), asi que encontrar 2+ fechas en un mismo mes es prueba de que
-# hay dato diario de verdad, no solo el agregado cayendo en la ventana.
-ultimo_dato = df["fecha"].max()
-ventana_diaria = df[df["fecha"] >= ultimo_dato - pd.Timedelta(days=35)].copy()
-ventana_diaria["anio_mes"] = ventana_diaria["fecha"].dt.to_period("M")
-hay_dato_diario = (ventana_diaria.groupby("anio_mes").size() > 1).any()
+# cubre algunas regiones con el catalogo completo -- el resto solo tiene el
+# agregado mensual porque todavia no las recolectamos asi, no porque SISAP
+# no lo publique. Mostrar esto como un grafico vacio para el resto de
+# productos seria peor que no mostrarlo.
+#
+# Desde 2026-10-17 cada fila trae su `periodicidad`, asi que "hay dato
+# diario" se lee directo de los datos. Antes se deducia de la densidad (2+
+# fechas en un mismo mes), y el dia 1 de cada mes podia ser el agregado
+# mensual graficado como si fuera el precio de ese dia.
+regiones_con_diario = _opciones(
+    con,
+    "SELECT DISTINCT r.nombre_region FROM fact_precios f "
+    "JOIN dim_region r ON f.region_id = r.region_id "
+    "WHERE f.periodicidad = 'dia' ORDER BY 1",
+)
+texto_regiones_diarias = (
+    ", ".join(regiones_con_diario[:-1]) + f" y {regiones_con_diario[-1]}"
+    if len(regiones_con_diario) > 1 else "".join(regiones_con_diario) or "ninguna región"
+)
+if not df_diario.empty:
+    ultimo_dia = df_diario["fecha"].max()
+    ventana_diaria = df_diario[df_diario["fecha"] >= ultimo_dia - pd.Timedelta(days=35)]
+else:
+    ventana_diaria = df_diario
 
 with st.container(border=True):
-    if hay_dato_diario:
+    if not ventana_diaria.empty:
         fig_dias = go.Figure()
         fig_dias.add_scatter(
             x=ventana_diaria["fecha"], y=ventana_diaria["precio"], mode="lines+markers",
             line={"color": COLOR_SERIE, "width": 2.5, "shape": "spline", "smoothing": 0.3},
             marker={"size": 6},
             fill="tozeroy", fillcolor=f"rgba({COLOR_SERIE_RGB},0.15)",
-            hovertemplate="%{x|%d %b %Y}<br>S/ %{y:.2f}<extra></extra>",
+            hovertemplate="%{x|%d/%m/%Y}<br>S/ %{y:.2f}<extra></extra>",
         )
         st.plotly_chart(
             _layout_base(fig_dias, "Últimos días", "Precio (S/ por kg)"),
-            use_container_width=True,
+            width="stretch",
         )
         st.caption(
-            "Dato diario/sub-mensual real (no agregado mensual) — nuestra "
-            "automatización diaria cubre Lima, Arequipa y Piura (Cusco no "
-            "tiene este tipo de reporte en SISAP). El resto de regiones "
-            "todavía no se recolecta así, no porque SISAP no lo publique."
+            "Dato diario real (no agregado mensual) — nuestra automatización "
+            f"diaria cubre {texto_regiones_diarias}. El resto de regiones "
+            "todavía no se recolecta así, no porque SISAP no lo publique "
+            "(salvo Cusco, que no tiene reporte diario en SISAP)."
         )
         if region == TODO_EL_PERU:
             st.caption(
-                "🌎 El dato diario real hoy solo existe en Lima, Arequipa y "
-                "Piura -- este tramo del promedio nacional refleja nada más "
-                "las regiones que reportaron ese día específico, que puede "
-                "no ser todas."
+                f"🌎 El dato diario real hoy solo existe en {texto_regiones_diarias} "
+                "-- este gráfico promedia nada más las regiones que reportaron "
+                "ese día específico, no el país entero."
             )
     else:
         st.info(
             "Todavía no recolectamos dato diario para este producto o región "
-            "— nuestra automatización cubre Lima, Arequipa y Piura con el "
-            "catálogo completo (Cusco no tiene reporte diario en SISAP; el "
-            "resto de regiones todavía no se recolecta así). SISAP sí "
-            "publica reporte diario para la mayoría del catálogo en esas "
-            "regiones, simplemente esta combinación puntual no cayó en la "
-            "ventana reciente; mientras tanto, esta página muestra el "
-            "agregado mensual (ver 'Evolución histórica' arriba)."
+            f"— nuestra automatización diaria cubre {texto_regiones_diarias} "
+            "con el catálogo completo (Cusco no tiene reporte diario en SISAP; "
+            "el resto de regiones todavía no se recolecta así). Mientras "
+            "tanto, esta página muestra el agregado mensual (ver 'Evolución "
+            "histórica' arriba)."
         )
 
 # --- Barras: comparacion regional (mismo hue: es magnitud, no identidad) ---
 # Bug real encontrado 2026-09-10: antes comparaba "f.fecha = MAX(fecha) de
 # TODA la tabla" -- funcionaba mientras todas las regiones compartian el
 # mismo calendario mensual, pero desde que Lima/Arequipa/Piura tienen
-# automatizacion diaria (ver cli.py, REGIONES_AUTOMATIZADAS), el maximo
-# global salto a HOY, y las otras ~24 regiones (que solo reportan mensual,
-# fecha 01 de cada mes) dejaron de calzar con esa fecha exacta -- el
-# grafico se quedaba con 3 barras, no porque el resto no tuviera dato
-# reciente, sino porque no tenian dato EXACTAMENTE ese dia. El fix: cada
-# region usa SU PROPIA fecha mas reciente (QUALIFY + MAX(...) OVER
-# PARTITION BY region), no una fecha compartida.
+# automatizacion diaria, el maximo global salto a HOY, y las otras ~24
+# regiones dejaron de calzar con esa fecha exacta -- el grafico se quedaba
+# con 3 barras. El fix fue que cada region use SU PROPIA fecha mas reciente.
+#
+# Desde 2026-10-17 se compara el ULTIMO MES de cada region (de
+# fact_precios_mensual), no su ultima fila: antes la barra de Lima era el
+# precio de un dia suelto y la de Puno el promedio de un mes entero.
 comparacion = con.execute(
     """
-    SELECT r.nombre_region, f.precio / f.equivalencia_kg AS precio, f.fecha
-    FROM fact_precios f
-    JOIN dim_producto p ON f.producto_id = p.producto_id
-    JOIN dim_region r ON f.region_id = r.region_id
-    JOIN dim_variable v ON f.variable_id = v.variable_id
+    SELECT r.nombre_region, m.precio_kg AS precio, m.mes
+    FROM fact_precios_mensual m
+    JOIN dim_producto p ON m.producto_id = p.producto_id
+    JOIN dim_region r ON m.region_id = r.region_id
+    JOIN dim_variable v ON m.variable_id = v.variable_id
     WHERE p.nombre_producto = ? AND v.tipo_mercado = ? AND v.tipo_precio = ?
-      AND f.precio IS NOT NULL
-    QUALIFY f.fecha = MAX(f.fecha) OVER (PARTITION BY r.nombre_region)
-    ORDER BY f.precio DESC
+    QUALIFY m.mes = MAX(m.mes) OVER (PARTITION BY r.nombre_region)
+    ORDER BY m.precio_kg DESC
     """,
     [producto, tipo_mercado, tipo_precio],
 ).df()
@@ -860,20 +967,20 @@ with st.container(border=True):
         fig_regiones.add_bar(
             x=comparacion["nombre_region"], y=comparacion["precio"],
             marker_color=COLOR_SERIE, marker_line_width=0,
-            customdata=comparacion["fecha"],
-            # cada barra puede ser de una fecha distinta ahora (ver arriba)
-            # -- mostrarla evita que el usuario asuma que todas son "hoy".
-            hovertemplate="%{x}<br>%{customdata|%d %b %Y}<br>S/ %{y:.2f}<extra></extra>",
+            customdata=[_fecha_corta(pd.Timestamp(mes), con_dia=False) for mes in comparacion["mes"]],
+            # cada barra puede ser de un mes distinto -- mostrarlo evita
+            # que el usuario asuma que todas son del mismo periodo.
+            hovertemplate="%{x}<br>%{customdata}<br>S/ %{y:.2f}<extra></extra>",
         )
         fig_regiones.update_traces(marker={"cornerradius": 4})
         st.plotly_chart(
-            _layout_base(fig_regiones, "Comparación entre regiones (dato más reciente de cada una)", "Precio (S/ por kg)"),
-            use_container_width=True,
+            _layout_base(fig_regiones, "Comparación entre regiones (último mes de cada una)", "Precio (S/ por kg)"),
+            width="stretch",
         )
         st.caption(
-            "Cada región muestra su propio dato más reciente disponible — "
-            "no todas reportan en la misma fecha (pasá el mouse sobre cada "
-            "barra para ver de cuándo es)."
+            "Cada región muestra su valor mensual más reciente — no todas "
+            "reportan todos los meses (pasá el mouse sobre cada barra para "
+            "ver de qué mes es)."
         )
     else:
         st.info(
@@ -884,7 +991,12 @@ with st.container(border=True):
 # --- Tabla paginada + export ---
 with st.expander("DATOS CRUDOS Y EXPORTACIÓN"):
     FILAS_POR_PAGINA = 15
-    df_tabla = df.sort_values("fecha", ascending=False).reset_index(drop=True)
+    df_tabla = (
+        df.sort_values(["fecha", "periodicidad"], ascending=False)
+        .assign(periodicidad=lambda t: t["periodicidad"].map({"dia": "diario", "mensual": "mensual"}))
+        .rename(columns={"periodicidad": "granularidad", "precio": "precio_s_por_kg"})
+        .reset_index(drop=True)
+    )
     total_paginas = max(1, -(-len(df_tabla) // FILAS_POR_PAGINA))  # division hacia arriba
 
     col_tabla, col_boton = st.columns([3, 1])
@@ -894,14 +1006,17 @@ with st.expander("DATOS CRUDOS Y EXPORTACIÓN"):
             label_visibility="collapsed",
         )
     with col_boton:
+        # el nombre del producto viene de SISAP (ej. "Pescado fresco/
+        # congelado") -- ver sanitizar.py
+        nombre_archivo = nombre_de_archivo(f"{producto}_{region}_{tipo_mercado}_{tipo_precio}")
         st.download_button(
             "⬇ Descargar CSV",
-            df_tabla.to_csv(index=False).encode("utf-8"),
-            file_name=f"{producto}_{region}_{tipo_mercado}_{tipo_precio}.csv",
+            csv_sin_formulas(df_tabla),
+            file_name=f"{nombre_archivo}.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
 
     inicio = (pagina - 1) * FILAS_POR_PAGINA
-    st.dataframe(df_tabla.iloc[inicio : inicio + FILAS_POR_PAGINA], use_container_width=True, hide_index=True)
+    st.dataframe(df_tabla.iloc[inicio : inicio + FILAS_POR_PAGINA], width="stretch", hide_index=True)
     st.caption(f"Página {pagina} de {total_paginas} · {len(df_tabla)} filas en total")

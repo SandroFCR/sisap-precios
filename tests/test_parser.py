@@ -150,3 +150,29 @@ def test_parse_resumen_mensual_pagina_de_error_falla_fuerte():
 
     with pytest.raises(ValueError, match="SISAP devolvio una pagina de error"):
         parse_resumen_mensual(html, region="Lima", variable="min_precio_prom")
+
+
+def test_parse_resumen_dia_cada_grupo_usa_su_propia_unidad():
+    """Bug real encontrado 2026-10-17 (HTML real de Lima, 14-sep-2026): con
+    mayorista y minorista juntos, cada grupo trae su PROPIO par unidad/
+    equivalencia, y se usaba el del mayorista para todo. Aji rocoto se vende
+    en "Cajon" (18 kg) al por mayor y en "Kilogramo" al por menor: el precio
+    minorista quedaba 18 veces mas barato por kg. Carne de pollo, sin
+    mayorista, quedaba con unidad vacia y equivalencia NaN."""
+    html = (FIXTURES / "resumen_dia_lima_unidades_distintas.html").read_text(encoding="utf-8")
+    variables = [
+        "may_precio_min", "may_precio_prom", "may_precio_max",
+        "min_precio_min", "min_precio_prom", "min_precio_max",
+    ]
+
+    registros = parse_resumen_dia(html, fecha=date(2026, 9, 14), region="Lima", variables=variables)
+    por_clave = {(r.producto, r.variable): r for r in registros}
+
+    rocoto_mayorista = por_clave[("Aji rocoto", "may_precio_max")]
+    assert (rocoto_mayorista.unidad, rocoto_mayorista.equivalencia_kg, rocoto_mayorista.precio) == ("Cajon", 18.0, 90.0)
+    rocoto_minorista = por_clave[("Aji rocoto", "min_precio_max")]
+    assert (rocoto_minorista.unidad, rocoto_minorista.equivalencia_kg, rocoto_minorista.precio) == ("Kilogramo", 1.0, 13.0)
+
+    pollo_minorista = por_clave[("Carne de pollo (eviscerado)", "min_precio_prom")]
+    assert (pollo_minorista.unidad, pollo_minorista.equivalencia_kg, pollo_minorista.precio) == ("Kilogramo", 1.0, 9.13)
+    assert por_clave[("Carne de pollo (eviscerado)", "may_precio_prom")].precio is None

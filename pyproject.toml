@@ -20,16 +20,24 @@ dev = [
     "pytest>=9.1",
     "pytest-cov>=4.1",
     "ruff>=0.6",
+    "pip-audit>=2.7",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.ruff.lint]
+# S: reglas de seguridad (equivalentes a bandit) -- SQL armado con strings,
+# assert usado como validacion, requests sin timeout, subprocess, etc.
+extend-select = ["S"]
 # DTZ011: pedimos fechas calendario "naive" a proposito (calzan con las
 # fechas calendario, sin hora, que usa el portal de MIDAGRI) -- no es un
 # datetime con hora donde la zona horaria importaria.
 ignore = ["DTZ011"]
+
+[tool.ruff.lint.per-file-ignores]
+# en los tests, assert ES la herramienta (S101), y los SQL son fijos de prueba
+"tests/**" = ["S101", "S608"]
 
 [build-system]
 requires = ["setuptools>=68"]

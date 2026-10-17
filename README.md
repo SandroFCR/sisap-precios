@@ -18,7 +18,7 @@ Este proyecto resuelve eso: reconstruye el dataset completo por fuera del sitio,
 
 ## Qué hace, en una frase
 
-**Scraper respetuoso → validación con Pydantic → Parquet (staging) → modelo en estrella en DuckDB → dashboard en Streamlit**, con una corrida diaria automática vía GitHub Actions.
+**Scraper respetuoso → validación con Pydantic → Parquet (staging) → modelo en estrella en DuckDB → dashboard en Streamlit**, con una corrida diaria automática vía GitHub Actions que además recupera los días perdidos, refresca el agregado mensual de las 28 regiones cada semana y avisa si los datos se quedan viejos.
 
 ```
 ┌──────────────┐    ┌──────────────┐    ┌───────────────┐    ┌──────────────────┐    ┌─────────────┐
@@ -28,13 +28,14 @@ Este proyecto resuelve eso: reconstruye el dataset completo por fuera del sitio,
 └──────────────┘    └──────────────┘    └───────────────┘    └──────────────────┘    └──────┬──────┘
                                                                                               │
 ┌──────────────────┐    ┌───────────────────────────────────────────────────────────────────┘
-│  dashboard.py     │◀───│  warehouse.py: modelo en estrella + reglas de outliers (DuckDB)
-│  Streamlit +      │    └───────────────────────────────────────────────────────────────────
-│  Plotly           │
+│  dashboard.py     │◀───│  warehouse.py: modelo en estrella + reglas de outliers (DuckDB,
+│  Streamlit +      │    │  armado en memoria al arrancar el dashboard, ~1 s)
+│  Plotly           │    └───────────────────────────────────────────────────────────────────
 └──────────────────┘
 
-GitHub Actions (runner autohospedado, cron diario) ejecuta scraper → warehouse → commit,
-sin intervención manual.
+GitHub Actions (runner autohospedado, cron diario): dato diario de la última semana, hoy
+incluido → refresco del agregado mensual (al empezar cada mes y cada 6+ días) →
+validación del warehouse → commit del parquet → alarma de frescura. Sin intervención manual.
 ```
 
 ---
@@ -70,7 +71,7 @@ Separar "typo de digitación" de "el mercado realmente cambió de precio" con un
 - sus dos vecinos temporales concuerdan entre sí (evidencia de que representan el nivel real, no están en medio de su propia transición), **y**
 - el valor se aleja fuerte de ese nivel compartido (menos del 40% o más del 250%), bajo su propia unidad **o** bajo la unidad de los vecinos (para atrapar el caso de la colisión de unidades sin re-introducir falsos positivos).
 
-Esto pasó por tres iteraciones reales: la primera versión era demasiado laxa (dejaba pasar típos moderados), la segunda demasiado agresiva (433 falsos positivos, todos por el bug de colisión de unidades sin corregir todavía), la tercera es la que quedó — **67 outliers genuinos** detectados sobre ~700K filas, cada uno con su propio test de regresión que documenta el caso real que lo motivó.
+Esto pasó por tres iteraciones reales: la primera versión era demasiado laxa (dejaba pasar típos moderados), la segunda demasiado agresiva (433 falsos positivos, todos por el bug de colisión de unidades sin corregir todavía), la tercera es la que quedó — **67 outliers genuinos** detectados sobre ~700K filas en su momento (con el dataset re-scrapeado completo en octubre de 2026: 95 sobre ~671K filas, 93 mensuales y 2 diarios), cada regla con su propio test de regresión que documenta el caso real que la motivó.
 
 El valor crudo **nunca se borra** — se anula solo en la capa de hechos (`fact_precios`), y sigue disponible íntegro en `staging_precios` para auditoría.
 
@@ -96,6 +97,29 @@ La automatización diaria (`cmd_hoy`/`cmd_historico`) arrancó pensada para un p
 
 Un efecto secundario de la misma expansión: el gráfico "Evolución histórica" empezó a anclar cada punto mensual en fechas distintas según si el mes tenía grano diario o no (día 1 vs. día 30), lo que inflaba artificialmente la distancia entre meses consecutivos y activaba el corte de huecos de más de 45 días (pensado para huecos *reales* de reporte, ver sección "El dashboard") donde no correspondía — un mes con dato diario terminaba viéndose desconectado del anterior aunque hubo datos continuos. La fecha de cada punto ahora se ancla siempre al día 1 del mes, sin importar la granularidad real detrás — consistente con cómo ya se interpretaban los meses puramente mensuales.
 
+### 8. Datos que se veían bien pero estaban congelados
+
+Una auditoría del dataset (2026-10-17), seis semanas después de dejar la automatización corriendo sola, encontró cinco problemas que ningún test ni health check marcaba, porque el dashboard seguía mostrando números creíbles:
+
+- **25 de 28 regiones congeladas.** La corrida diaria solo pedía el dato diario de 3 regiones; nada volvía a pedir el agregado mensual después de la carga inicial (5 de septiembre). Esas regiones se quedaron con un septiembre parcial (5 días) y sin octubre, mientras "Comparación entre regiones" ponía a Lima del 17 de octubre al lado de ellas. **Fix:** `refrescar-mensual` pide solo los meses recientes (el parámetro `meses[]` acepta cualquier subconjunto: 2 meses × 51 productos = 1 pedido de ~5 s) y se salta la corrida si el último refresco tiene menos de N días. Así el costo (168 pedidos) se paga una vez por semana aunque el runner haya estado apagado justo el día "que tocaba".
+- **Un refresco que no podía refrescar.** Ante dos lecturas de la misma clave, la deduplicación se quedaba con el precio más alto: el promedio parcial viejo le ganaba al mes completo cada vez que era mayor. **Fix:** cada fila guarda su `fecha_captura` y gana la más reciente (la unidad habitual sigue teniendo prioridad, ver bug #2).
+- **El día 1 significaba dos cosas.** El agregado mensual se fecha el día 1, y el dato diario del día 1 tenía la misma clave natural: uno pisaba al otro en silencio. **Fix:** columna `periodicidad` (`dia`/`mensual`) en el contrato de datos y en la clave. Las dos series se evalúan por separado en la regla de outliers, y una tabla `fact_precios_mensual` da un valor por mes y región: el agregado oficial de SISAP cuando existe (la misma metodología en las 28 regiones) y el promedio de los días solo para los meses que todavía no lo tienen.
+- **Días perdidos para siempre, y congelados en su versión de la mañana.** `hoy` solo pide la fecha de hoy: 6 días entre septiembre y octubre quedaron sin dato (runner apagado o SISAP sin responder). Peor: SISAP sigue corrigiendo el dato de un día después de publicarlo (165 de 402 precios de Lima del 14 de septiembre cambiaron), y la captura de la mañana quedaba fija. **Fix:** cada corrida vuelve a pedir la última semana (`historico --ultimos-dias 7`), hoy incluido.
+- **Dos modos del sitio, dos respuestas.** Para el mismo día, el modo "Día" y el modo "Intervalo" de SISAP no coinciden en el precio máximo, y el promedio del modo "Intervalo" es el que cuadra con el agregado mensual oficial (error mediano 0,0 % contra 1,8 %). Además, el parser del modo "Día" usaba la unidad del grupo mayorista para los precios minoristas: Ají rocoto (mayorista en "Cajón" de 18 kg, minorista por kilo) salía 18 veces más barato por kg, y un producto sin mayorista quedaba con unidad vacía. **Fix:** el parser toma la unidad de cada grupo (test con el HTML real), y la automatización usa solo el modo "Intervalo", así que todo el dato diario sale de una única fuente consistente.
+- **Corridas "verdes" sin datos nuevos.** **Fix:** `verificar-frescura` pone el job en rojo si el dato diario o el mensual pasan su antigüedad máxima, y una región que falla ya no corta la corrida de las demás: se registra, se commitea lo que sí llegó y el job termina en rojo.
+
+De paso: el 14% del parquet eran filas sin precio (celdas vacías de productos sin minorista y meses futuros del año en curso) que ya no se guardan. El `.duckdb` (19 MB, distinto byte a byte en cada corrida, ~90% del crecimiento diario del repo) dejó de versionarse: el dashboard arma el modelo en memoria desde el parquet en ~1 s, y nunca puede quedar leyendo un warehouse desfasado.
+
+### 9. Seguridad con un modelo de amenaza concreto
+
+No hay usuarios, secretos ni datos personales, pero sí tres superficies reales, cada una cubierta por un test en `test_seguridad.py`:
+
+1. **Texto externo, sin TLS.** SISAP no completa un handshake TLS moderno, así que se baja por HTTP (riesgo aceptado: datos públicos; el scraper no sigue redirecciones y todo pasa por la validación de `PriceRecord`, que rechaza precios ≤0, NaN o infinitos). Ese texto termina en un dashboard público, así que nombres de producto y unidades se escapan antes de llegar a cualquier widget que interprete Markdown o HTML. El CSV descargable neutraliza celdas que una planilla ejecutaría como fórmula (`=`, `+`, `-`, `@`), y los nombres de archivo se sanean.
+2. **SQL y rutas.** Toda consulta va con parámetros (ninguna interpola strings; lo verifican ruff `S608` y un test estático). Los argumentos de la CLI que terminan en URLs y en nombres de archivo bajo `data/raw/` se validan contra su formato (`../../x` no pasa).
+3. **Runner autohospedado en un repo público.** Un workflow con `pull_request` que corriera en ese runner ejecutaría código de cualquier fork en la PC del autor: un test lo prohíbe. Además, las actions están fijadas por SHA de commit (un tag se puede mover), cada workflow declara permisos mínimos, las dependencias de producción están fijadas (Dependabot propone las actualizaciones) y CI corre `pip-audit` en cada push, incluidos los commits diarios del bot. Streamlit ya no muestra tracebacks completos a los visitantes (`showErrorDetails = "type"`).
+
+Los tests de seguridad se validaron por mutación: con la defensa quitada, el test correspondiente falla.
+
 ---
 
 ## El dashboard
@@ -114,7 +138,7 @@ Un efecto secundario de la misma expansión: el gráfico "Evolución histórica"
 
 ## Modelo de datos
 
-Esquema en estrella en DuckDB, reconstruido completo en cada corrida desde `precios.parquet` (la única fuente de verdad):
+Esquema en estrella en DuckDB, reconstruido completo desde `precios.parquet` (la única fuente de verdad versionada): en memoria cada vez que arranca el dashboard, y como archivo (`sisap.duckdb`, fuera de git) con `construir-dwh` para consultas SQL locales:
 
 ```
                     ┌────────────────┐
@@ -130,15 +154,20 @@ Esquema en estrella en DuckDB, reconstruido completo en cada corrida desde `prec
 │ nombre        │   │  region_id (FK)  │   │ nombre_region │
 └──────────────┘   │  producto_id (FK)│   └──────────────┘
                     │  variable_id (FK)│
-                    │  unidad          │   ┌──────────────────┐
-                    │  equivalencia_kg │──▶│  dim_variable     │
-                    │  precio          │   │  variable_id      │
-                    └──────────────────┘   │  tipo_mercado     │
-                                            │  tipo_precio      │
-                                            └──────────────────┘
+                    │  periodicidad    │   ┌──────────────────┐
+                    │  unidad          │──▶│  dim_variable     │
+                    │  equivalencia_kg │   │  variable_id      │
+                    │  precio          │   │  tipo_mercado     │
+                    └────────┬─────────┘   │  tipo_precio      │
+                             │             └──────────────────┘
+                    ┌────────▼──────────────┐
+                    │  fact_precios_mensual  │  1 valor por mes x región x producto
+                    │  mes, *_id, precio_kg  │  x variable: el agregado oficial de
+                    │  fuente, n_datos       │  SISAP, o el promedio de los días
+                    └───────────────────────┘  si el mes todavía no lo tiene
 ```
 
-`staging_precios` vive aparte, como capa cruda sin modelar (el parquet tal cual) — separarla del esquema en estrella deja claro qué es dato de origen y qué es resultado de negocio (como la anulación de outliers).
+La clave natural es `(fecha, region, producto, variable, periodicidad)`: el agregado mensual (fechado el día 1) y el dato diario del día 1 conviven. `staging_precios` vive aparte, como capa cruda sin modelar (el parquet tal cual, con su `fecha_captura`) — separarla del esquema en estrella deja claro qué es dato de origen y qué es resultado de negocio (como la anulación de outliers).
 
 ---
 
@@ -150,12 +179,13 @@ Esquema en estrella en DuckDB, reconstruido completo en cada corrida desde `prec
 | Parsing | `BeautifulSoup4` | HTML mal formado, sin JSON — necesita tolerancia a errores |
 | Validación | `Pydantic` | Un `PriceRecord` inválido falla en el borde, no 3 pasos después |
 | Almacenamiento crudo | `Parquet` (pandas/pyarrow) | Columnar, comprimido, versionable en git sin pesar demasiado |
-| Warehouse analítico | `DuckDB` | SQL completo (window functions) sin levantar un servidor de base de datos |
+| Warehouse analítico | `DuckDB` | SQL completo (window functions) sin levantar un servidor de base de datos; el dashboard lo arma en memoria en ~1 s |
 | Dashboard | `Streamlit` + `Plotly` | Iteración rápida en Python puro, sin escribir HTML/JS a mano |
 | Testing | `pytest` + `AppTest` | Fixtures de HTML real capturado del sitio, no mocks inventados |
 | Automatización | GitHub Actions (runner **autohospedado**) | MIDAGRI bloquea IPs de datacenter en la nube (confirmado: `ubuntu-latest` de GitHub da `ConnectTimeout`) — la única opción es correr desde una IP residencial |
-| CI | GitHub Actions (`ubuntu-latest`) | `pytest` + `ruff` en cada push/PR — a diferencia del scraper, los tests solo leen el duckdb ya versionado, no le pegan a MIDAGRI, así que no necesitan el runner autohospedado |
-| Lint | `ruff` | Rápido, sin config ceremoniosa |
+| CI | GitHub Actions (`ubuntu-latest`) | `pytest` + `ruff` + `pip-audit` en cada push/PR — a diferencia del scraper, los tests solo leen el parquet ya versionado, no le pegan a MIDAGRI, así que no necesitan el runner autohospedado (y nunca deben usarlo: corre código de PRs de forks) |
+| Lint | `ruff` (+ reglas de seguridad `S`) | Rápido, sin config ceremoniosa; las reglas `S` (equivalentes a bandit) atrapan SQL armado con strings, `assert` usado como validación, etc. |
+| Dependencias | versiones fijas + Dependabot + `pip-audit` | Una release nueva no puede romper producción sin pasar antes por un PR con CI |
 
 ---
 
@@ -166,9 +196,11 @@ src/sisap/
 ├── scraper.py      # HTTP: arma las peticiones a los 3 endpoints de SISAP
 ├── parser.py       # HTML → PriceRecord: un parser por cada forma de tabla
 ├── models.py       # PriceRecord (Pydantic) — el contrato de datos del pipeline
-├── storage.py       # Persistencia idempotente a Parquet + deduplicación por unidad habitual
-├── warehouse.py     # Parquet → esquema en estrella en DuckDB + reglas de outliers
-├── cli.py           # Comandos: hoy, historico, consultar, poblar-historico, construir-dwh
+├── storage.py       # Persistencia idempotente a Parquet + deduplicación (unidad habitual, captura más reciente)
+├── warehouse.py     # Parquet → esquema en estrella en DuckDB + reglas de outliers + vista mensual
+├── cli.py           # Comandos: hoy, historico, consultar, poblar-historico, refrescar-mensual,
+│                    #           construir-dwh, verificar-frescura
+├── sanitizar.py     # Texto de SISAP antes de mostrarlo/exportarlo (Markdown, CSV, nombres de archivo)
 ├── dashboard.py      # Streamlit + Plotly
 └── assets/
     ├── peru_regiones.geojson
@@ -177,12 +209,16 @@ src/sisap/
 tests/
 ├── test_parser.py      # Fixtures de HTML real capturado del sitio
 ├── test_storage.py     # Casos de colisión de unidades con datos reales
-├── test_warehouse.py   # Cada regla de outliers con el caso real que la motivó
+├── test_warehouse.py   # Cada regla de outliers con el caso real que la motivó + vista mensual
+├── test_cli.py         # Refresco mensual, recuperación de días, fallas aisladas por región, frescura
+├── test_seguridad.py   # Una prueba por defensa (ver sección 9)
 └── test_dashboard.py   # AppTest: simula sesiones reales, no solo health checks
 
-.github/workflows/
-├── actualizar_datos.yml   # Cron diario en runner autohospedado (necesita IP residencial)
-└── ci.yml                 # pytest + ruff en cada push/PR, en runner normal de GitHub
+.github/
+├── workflows/
+│   ├── actualizar_datos.yml   # Cron diario en runner autohospedado (necesita IP residencial)
+│   └── ci.yml                 # pytest + ruff + pip-audit en cada push/PR, en runner normal de GitHub
+└── dependabot.yml             # PRs semanales con actualizaciones de dependencias y actions
 ```
 
 ---
@@ -196,22 +232,27 @@ python -m venv .venv
 .venv\Scripts\activate        # Windows
 pip install -e ".[dev]"
 
-# el repo ya trae data/processed/precios.parquet y sisap.duckdb poblados —
-# el dashboard funciona sin scrapear nada primero
+# el repo ya trae data/processed/precios.parquet poblado — el dashboard arma
+# el modelo en memoria al arrancar, funciona sin scrapear nada primero
 streamlit run src/sisap/dashboard.py
 ```
 
 Para reconstruir el pipeline desde cero:
 
 ```bash
+python -m sisap.cli poblar-historico --desde-anio 2021 --hasta-anio 2026  # agregado mensual, catalogo completo
+python -m sisap.cli historico --desde 2026-08-01 --hasta 2026-10-17       # dato diario de un rango
 python -m sisap.cli hoy                                    # snapshot del dia
-python -m sisap.cli poblar-historico --desde-anio 2021 --hasta-anio 2026  # catalogo completo
-python -m sisap.cli construir-dwh                           # reconstruye el modelo en estrella
+python -m sisap.cli historico --ultimos-dias 7             # recupera la ultima semana
+python -m sisap.cli refrescar-mensual --meses 2            # re-pide el agregado de los ultimos 2 meses
+python -m sisap.cli construir-dwh                          # sisap.duckdb local, para consultas SQL
+python -m sisap.cli verificar-frescura                     # codigo 1 si los datos estan viejos
 ```
 
 ```bash
-pytest -q            # 22 tests
-ruff check src/ tests/
+pytest -q            # 91 tests
+ruff check .
+pip-audit --skip-editable
 ```
 
 ---
@@ -219,10 +260,13 @@ ruff check src/ tests/
 ## Limitaciones conocidas (documentadas a propósito, no escondidas)
 
 - El mapa muestra 25 de 28 regiones como polígonos clicables — Andahuaylas, Chota y Jaén son provincias que SISAP reporta aparte de su departamento, pero no existen como polígono propio en el GeoJSON a nivel departamental; siguen siendo elegibles por el dropdown.
-- Lima y Callao no tienen mercado **mayorista** para varios productos (carnes en particular) — confirmado contra el sitio en vivo, es una característica real de la fuente, no un hueco de scraping.
+- Callao no tiene mercado **mayorista** en SISAP en absoluto (ningún producto, ningún año: el sitio devuelve su página de error), y Lima no lo tiene para varios productos (carnes en particular) — confirmado contra el sitio en vivo, es una característica real de la fuente, no un hueco de scraping.
 - El histórico completo cubre 2021–2026, limitado por lo que SISAP expone en su interfaz.
 - 4 de los 51 géneros del catálogo de SISAP (Aceituna botija, Cerezas, Fresa, Gallo) están listados en el checkbox de productos del sitio pero nunca tienen precio reportado, en ninguna región ni año — confirmado pidiéndolos en vivo contra el sitio (devuelve la página de "sin datos" de SISAP, no un timeout ni un error nuestro). No aparecen en el dropdown de Producto del dashboard porque nunca hay una fila que agregar a `dim_producto`.
 - El dato diario/sub-mensual real (catálogo completo, no solo un puñado de productos) se recolecta en Lima, Arequipa y Piura — **Cusco no tiene reporte "Día" ni "Intervalo de Tiempo" en SISAP en absoluto** (confirmado: falla hasta con 1 solo producto, 1 solo día; el modo "Mensual" sí funciona ahí con normalidad). El resto de las 28 regiones solo tiene el agregado mensual porque todavía no se agregaron a la automatización, no por una limitación de la fuente.
+- El agregado mensual se refresca una vez por semana: para las regiones sin dato diario, el mes en curso puede tener hasta ~6 días de atraso.
+- SISAP se baja por HTTP: el servidor no completa un handshake TLS moderno (ver sección 9).
+- El historial de git todavía carga ~40 versiones del `.duckdb` de cuando se versionaba (~200 MB); dejar de versionarlo frena el crecimiento, pero achicar el historial requiere reescribirlo (`git filter-repo`) y un force push.
 
 ---
 

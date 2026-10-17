@@ -243,3 +243,74 @@ def test_cambio_de_unidad_sin_evidencia_no_se_anula(tmp_path):
     assert precio_abril == 45.0
 
     con.close()
+
+
+def _hechos_mensuales(tmp_path, filas):
+    from sisap.warehouse import construir_en_memoria
+
+    ruta_parquet = tmp_path / "precios.parquet"
+    pd.DataFrame(filas).to_parquet(ruta_parquet, index=False)
+    con = construir_en_memoria(ruta_parquet)
+    return con.execute(
+        "SELECT mes, precio_kg, fuente, n_datos FROM fact_precios_mensual ORDER BY mes"
+    ).fetchall()
+
+
+def _fila_lima(fecha, precio, periodicidad):
+    return {
+        "fecha": fecha, "region": "Lima", "producto": "Tomate italiano", "unidad": "Kilogramo",
+        "equivalencia_kg": 1.0, "variable": "may_precio_prom", "precio": precio,
+        "periodicidad": periodicidad, "fecha_captura": date(2026, 10, 17),
+    }
+
+
+def test_vista_mensual_prefiere_el_agregado_oficial_al_promedio_de_los_dias(tmp_path):
+    """El agregado oficial de SISAP es la misma metodologia para las 28
+    regiones: es lo que hace comparables a Lima (con dato diario) y Puno
+    (solo mensual). Antes, el dashboard promediaba juntos el agregado del dia
+    1 y los ~30 dias del mes."""
+    filas = [
+        _fila_lima(date(2026, 9, 1), 2.00, "mensual"),
+        _fila_lima(date(2026, 9, 1), 1.00, "dia"),
+        _fila_lima(date(2026, 9, 2), 1.20, "dia"),
+    ]
+
+    assert _hechos_mensuales(tmp_path, filas) == [(date(2026, 9, 1), 2.00, "mensual", 1)]
+
+
+def test_vista_mensual_usa_el_promedio_diario_si_el_mes_no_tiene_agregado(tmp_path):
+    """El mes en curso, antes del refresco semanal del agregado, solo tiene
+    dato diario: el promedio de esos dias rellena el hueco."""
+    filas = [
+        _fila_lima(date(2026, 9, 1), 2.00, "mensual"),
+        _fila_lima(date(2026, 10, 2), 1.00, "dia"),
+        _fila_lima(date(2026, 10, 3), 1.50, "dia"),
+    ]
+
+    assert _hechos_mensuales(tmp_path, filas) == [
+        (date(2026, 9, 1), 2.00, "mensual", 1),
+        (date(2026, 10, 1), 1.25, "dia", 2),
+    ]
+
+
+def test_series_diaria_y_mensual_no_se_mezclan_al_buscar_outliers(tmp_path):
+    """El precio de un dia puede estar lejos del promedio del mes sin ser un
+    typo. Antes las dos granularidades compartian ventana: un dia suelto
+    quedaba "entre" dos agregados mensuales y la regla lo podia anular."""
+    filas = [
+        _fila_lima(date(2026, 8, 1), 1.00, "mensual"),
+        _fila_lima(date(2026, 9, 1), 1.00, "mensual"),
+        _fila_lima(date(2026, 10, 1), 1.00, "mensual"),
+        # un dia de septiembre a 3x el nivel mensual, entre dias parecidos
+        _fila_lima(date(2026, 9, 14), 3.10, "dia"),
+        _fila_lima(date(2026, 9, 15), 3.00, "dia"),
+        _fila_lima(date(2026, 9, 16), 3.05, "dia"),
+    ]
+    ruta_parquet = tmp_path / "precios.parquet"
+    pd.DataFrame(filas).to_parquet(ruta_parquet, index=False)
+
+    from sisap.warehouse import construir_en_memoria
+    con = construir_en_memoria(ruta_parquet)
+
+    anulados = con.execute("SELECT COUNT(*) FROM fact_precios WHERE precio IS NULL").fetchone()[0]
+    assert anulados == 0
