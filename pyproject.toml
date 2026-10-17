@@ -40,5 +40,5 @@ ignore = ["DTZ011"]
 "tests/**" = ["S101", "S608"]
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=83.0.0"]
 build-backend = "setuptools.build_meta"

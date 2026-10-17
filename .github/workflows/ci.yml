@@ -31,7 +31,11 @@ jobs:
       - name: Instalar el proyecto (versiones de produccion + dependencias de dev)
         # primero requirements.txt (lo que instala Streamlit Cloud), para que
         # los tests corran contra las mismas versiones que el dashboard publicado
+        # pip/setuptools primero: el setuptools que trae la imagen del runner
+        # puede tener CVEs conocidos (pip-audit lo marco el 2026-10-17:
+        # setuptools 79.0.1, PYSEC-2026-3447)
         run: |
+          python -m pip install --upgrade pip "setuptools>=83.0.0"
           pip install -r requirements.txt
           pip install -e ".[dev]"
 
