@@ -8,6 +8,8 @@ import duckdb
 import httpx
 
 from sisap.dw import ErrorDeIntegridad, construir_dw
+from sisap.dw.particion import comparar_rendimiento, particionar
+from sisap.dw.seguridad import MACRORREGIONES_PERMITIDAS, PERFILES, exportar_perfil
 from sisap.models import PriceRecord
 from sisap.parser import (
     PaginaDeErrorSisap,
@@ -22,6 +24,7 @@ from sisap.scraper import (
     fetch_resumen_mensual,
 )
 from sisap.storage import (
+    DATA_DIR,
     PROCESSED_DIR,
     guardar_html_crudo,
     guardar_html_crudo_intervalo,
@@ -502,6 +505,54 @@ def cmd_cargas_dw(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_exportar_perfil(args: argparse.Namespace) -> int:
+    """Genera el extracto de un perfil de seguridad: un .duckdb que contiene
+    SOLO lo que ese perfil puede ver (ver sisap.dw.seguridad)."""
+    ruta_dw = PROCESSED_DIR / "sisap_dw.duckdb"
+    if not ruta_dw.exists():
+        print(f"No existe {ruta_dw}: corre primero construir-dw")
+        return 1
+    if (args.perfil == "regional") != (args.macrorregion is not None):
+        print("--macrorregion es obligatoria en el perfil regional y no se usa en los demas")
+        return 1
+    sufijo = f"_{args.macrorregion.lower()}" if args.macrorregion else ""
+    ruta_salida = DATA_DIR / "extractos" / f"{args.perfil}{sufijo}.duckdb"
+    ruta_salida.parent.mkdir(parents=True, exist_ok=True)
+    filas = exportar_perfil(ruta_dw, args.perfil, ruta_salida, args.macrorregion, reemplazar=True)
+    print(f"Extracto del perfil '{args.perfil}' en {ruta_salida}:")
+    for tabla, n in filas.items():
+        print(f"  {tabla}: {n} filas")
+    return 0
+
+
+def cmd_particionar(args: argparse.Namespace) -> int:
+    """Escribe el historico particionado por anio (data/particionado/anio=AAAA/)."""
+    carpeta = DATA_DIR / "particionado"
+    filas = particionar(PROCESSED_DIR / "precios.parquet", carpeta)
+    print(f"Particionado en {carpeta}:")
+    for anio, n in filas.items():
+        print(f"  anio={anio}: {n} filas")
+    return 0
+
+
+def cmd_comparar_particion(args: argparse.Namespace) -> int:
+    """Mide una consulta de un anio sobre el archivo unico y sobre el particionado."""
+    c = comparar_rendimiento(
+        PROCESSED_DIR / "precios.parquet", DATA_DIR / "benchmark", args.anio, args.factor
+    )
+    if c.factor > 1:
+        print(f"AVISO: datos replicados x{c.factor} solo para la prueba de carga (sinteticos)")
+    print(f"Consulta: precio mayorista mensual de las papas por region, anio {c.anio}; "
+          f"{c.filas_dataset} filas en el dataset")
+    for m in (c.archivo_unico, c.particionado):
+        print(
+            f"  {m.variante:<22} {m.mediana_ms:>9.2f} ms  archivos {m.archivos_leidos}/"
+            f"{m.archivos_totales}  abre {m.bytes_leidos / 1e6:.2f} de "
+            f"{m.bytes_en_disco / 1e6:.2f} MB  ({m.filas_resultado} filas)"
+        )
+    return 0
+
+
 def cmd_verificar_frescura(args: argparse.Namespace) -> int:
     """Falla (codigo 1) si los datos estan viejos. Es la alarma del workflow
     diario: un job que corre "bien" pero no trae nada nuevo (SISAP cambio el
@@ -650,6 +701,28 @@ def crear_parser() -> argparse.ArgumentParser:
     )
     parser_cargas.add_argument("--ultimas", type=_entero_positivo, default=10)
     parser_cargas.set_defaults(func=cmd_cargas_dw)
+
+    parser_perfil = subparsers.add_parser(
+        "exportar-perfil", help="Extracto .duckdb con solo lo que ve un perfil de seguridad"
+    )
+    parser_perfil.add_argument("--perfil", choices=sorted(PERFILES), required=True)
+    parser_perfil.add_argument("--macrorregion", choices=MACRORREGIONES_PERMITIDAS)
+    parser_perfil.set_defaults(func=cmd_exportar_perfil)
+
+    parser_particionar = subparsers.add_parser(
+        "particionar", help="Escribe el historico particionado por anio (Hive)"
+    )
+    parser_particionar.set_defaults(func=cmd_particionar)
+
+    parser_comparar = subparsers.add_parser(
+        "comparar-particion", help="Rendimiento: archivo unico vs particionado por anio"
+    )
+    parser_comparar.add_argument("--anio", type=int, choices=range(2021, 2100), default=2024,
+                                 metavar="AAAA")
+    # tope de 50: ~35 millones de filas en memoria; mas no aporta a la prueba
+    parser_comparar.add_argument("--factor", type=int, choices=range(1, 51), default=1,
+                                 metavar="N", help="replica los datos N veces (1-50, solo prueba de carga)")
+    parser_comparar.set_defaults(func=cmd_comparar_particion)
 
     parser_frescura = subparsers.add_parser(
         "verificar-frescura", help="Falla si los datos estan desactualizados (alarma del workflow)"

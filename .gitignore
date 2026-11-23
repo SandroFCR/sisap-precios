@@ -20,3 +20,7 @@ data/processed/sisap.duckdb
 # El DW dimensional (rama dw-curso) tambien es local: guarda el historial de
 # cargas (etl_carga), que solo tiene sentido en la maquina que lo corre.
 data/processed/sisap_dw.duckdb
+# Salidas locales del DW: extractos por perfil y versiones particionadas
+data/extractos/
+data/particionado/
+data/benchmark/

@@ -23,6 +23,7 @@ import duckdb
 import pandas as pd
 
 from sisap.dw import modelo
+from sisap.dw.seguridad import crear_vistas_seguridad
 from sisap.dw.semillas import (
     SIN_CLASIFICAR,
     clasificar_region,
@@ -154,6 +155,7 @@ def _asegurar_esquema(con: duckdb.DuckDBPyConnection) -> None:
             con.execute(modelo.SQL_BORRAR_TABLA[tabla])
         con.execute(modelo.DDL[tabla])
     con.execute(modelo.VISTA_DIM_MES)
+    crear_vistas_seguridad(con)
     if con.execute("SELECT COUNT(*) FROM dim_mercado").fetchone()[0] == 0:
         con.execute(modelo.SQL_MERCADOS)
 
