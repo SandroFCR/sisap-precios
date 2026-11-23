@@ -4,8 +4,10 @@ import sys
 import time
 from datetime import date, timedelta
 
+import duckdb
 import httpx
 
+from sisap.dw import ErrorDeIntegridad, construir_dw
 from sisap.models import PriceRecord
 from sisap.parser import (
     PaginaDeErrorSisap,
@@ -452,6 +454,54 @@ def cmd_construir_dwh(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_construir_dw(_args: argparse.Namespace) -> int:
+    """Carga el data warehouse dimensional (hechos diario y mensual,
+    dimensiones con jerarquias, auditoria en etl_carga). Conserva el
+    historial de cargas entre corridas; si algo no cuadra, revierte y
+    termina con codigo 1."""
+    ruta_parquet = PROCESSED_DIR / "precios.parquet"
+    ruta_duckdb = PROCESSED_DIR / "sisap_dw.duckdb"
+    try:
+        resultado = construir_dw(ruta_parquet, ruta_duckdb)
+    except ErrorDeIntegridad as error:
+        print(f"Carga fallida (modelo sin cambios): {error}")
+        return 1
+    print(
+        f"Carga {resultado.carga_id} exitosa en {ruta_duckdb}: "
+        f"{resultado.filas_leidas} filas leidas, {resultado.filas_cargadas} hechos "
+        f"nuevos o cambiados, {resultado.filas_eliminadas} eliminados, "
+        f"{resultado.filas_atipicas} valores atipicos marcados"
+    )
+    for aviso in resultado.advertencias:
+        print(f"  AVISO: {aviso}")
+    return 0
+
+
+def cmd_cargas_dw(args: argparse.Namespace) -> int:
+    """Muestra las ultimas cargas del data warehouse (la tabla etl_carga)."""
+    ruta_duckdb = PROCESSED_DIR / "sisap_dw.duckdb"
+    if not ruta_duckdb.exists():
+        print(f"No existe {ruta_duckdb}: corre primero construir-dw")
+        return 1
+    con = duckdb.connect(str(ruta_duckdb), read_only=True)
+    try:
+        filas = con.execute(
+            "SELECT carga_id, inicio, estado, filas_leidas, filas_cargadas, "
+            "filas_eliminadas, filas_atipicas, mensaje FROM etl_carga "
+            "ORDER BY carga_id DESC LIMIT ?",
+            [args.ultimas],
+        ).fetchall()
+    finally:
+        con.close()
+    for carga_id, inicio, estado, leidas, cargadas, eliminadas, atipicas, mensaje in filas:
+        print(
+            f"#{carga_id} {inicio:%Y-%m-%d %H:%M} UTC  {estado:<9}  leidas={leidas} "
+            f"cargadas={cargadas} eliminadas={eliminadas} atipicas={atipicas}"
+            + (f"  [{mensaje}]" if mensaje else "")
+        )
+    return 0
+
+
 def cmd_verificar_frescura(args: argparse.Namespace) -> int:
     """Falla (codigo 1) si los datos estan viejos. Es la alarma del workflow
     diario: un job que corre "bien" pero no trae nada nuevo (SISAP cambio el
@@ -588,6 +638,18 @@ def crear_parser() -> argparse.ArgumentParser:
         "construir-dwh", help="Reconstruye el modelo dimensional en DuckDB"
     )
     parser_dwh.set_defaults(func=cmd_construir_dwh)
+
+    parser_dw = subparsers.add_parser(
+        "construir-dw",
+        help="Carga el data warehouse dimensional (hechos diario/mensual) con auditoria",
+    )
+    parser_dw.set_defaults(func=cmd_construir_dw)
+
+    parser_cargas = subparsers.add_parser(
+        "cargas-dw", help="Muestra las ultimas cargas del data warehouse (etl_carga)"
+    )
+    parser_cargas.add_argument("--ultimas", type=_entero_positivo, default=10)
+    parser_cargas.set_defaults(func=cmd_cargas_dw)
 
     parser_frescura = subparsers.add_parser(
         "verificar-frescura", help="Falla si los datos estan desactualizados (alarma del workflow)"

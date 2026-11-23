@@ -176,9 +176,9 @@ def test_nombres_hostiles_no_rompen_ni_inyectan_sql(tmp_path, nombre):
 def test_ningun_sql_del_paquete_se_arma_interpolando_strings():
     """Guardia estatica: ningun execute()/sql() del codigo de produccion
     recibe un f-string (las reglas S608 de ruff cubren lo mismo en CI)."""
-    for archivo in (RAIZ / "src" / "sisap").glob("*.py"):
+    for archivo in (RAIZ / "src" / "sisap").rglob("*.py"):
         codigo = archivo.read_text(encoding="utf-8")
-        assert not re.search(r"\.(execute|sql)\(\s*f[\"']", codigo), archivo.name
+        assert not re.search(r"\.(execute|sql)\(\s*f[\"']", codigo), str(archivo)
 
 
 def test_claves_duplicadas_en_el_parquet_fallan_fuerte(tmp_path):

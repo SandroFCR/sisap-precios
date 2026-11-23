@@ -17,3 +17,6 @@ data/raw/*
 # (19 MB, distinto byte a byte en cada corrida). `construir-dwh` lo sigue
 # generando en local para consultas SQL ad hoc.
 data/processed/sisap.duckdb
+# El DW dimensional (rama dw-curso) tambien es local: guarda el historial de
+# cargas (etl_carga), que solo tiene sentido en la maquina que lo corre.
+data/processed/sisap_dw.duckdb
