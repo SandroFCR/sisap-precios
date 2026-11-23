@@ -12,13 +12,17 @@ import streamlit as st
 
 # Streamlit Cloud corre este archivo como script suelto, sin instalar el
 # paquete (requirements.txt solo trae las dependencias): se agrega src/ al
-# path para poder reusar warehouse.py en vez de duplicar su logica.
+# path para poder reusar sisap.dw en vez de duplicar su logica.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from sisap.dw import construir_dw_en_memoria
+from sisap.dw.consultas import crear_macros_publicas
 from sisap.sanitizar import csv_sin_formulas, escapar_markdown, nombre_de_archivo
-from sisap.warehouse import construir_en_memoria
 
-# El modelo se arma en memoria desde el parquet (la unica fuente de verdad
-# versionada) -- ver warehouse.construir_en_memoria. SISAP_PARQUET permite
+# El data warehouse se arma en memoria desde el parquet (la unica fuente de
+# verdad versionada) -- ver sisap.dw.construir_dw_en_memoria. El dashboard es
+# una aplicacion PUBLICA: solo consulta las vistas del perfil `publico`
+# (sisap.dw.seguridad), que no exponen precios crudos, marcas de atipico,
+# linaje de carga ni auditoria. SISAP_PARQUET permite
 # apuntar el dashboard a otro archivo (lo usan los tests de seguridad).
 RUTA_PARQUET = Path(os.environ.get("SISAP_PARQUET", "data/processed/precios.parquet"))
 RUTA_GEOJSON = Path(__file__).parent / "assets" / "peru_regiones.geojson"
@@ -111,6 +115,15 @@ ESTILO_MAPA_DATA_URI = "data:application/json;base64," + base64.b64encode(
 ).decode()
 
 ETIQUETAS_TIPO_PRECIO = {"Mínimo": "Minimo", "Promedio": "Promedio", "Máximo": "Maximo"}
+
+# Consultas sobre el perfil publico: macros serie_publica(tipo) y
+# mensual_publico(tipo), definidas en sisap.dw.consultas.
+SQL_VARIEDADES = """
+    SELECT variedad FROM publico.precios_mensuales WHERE region = ? OR ? IS NULL
+    UNION
+    SELECT variedad FROM publico.precios_diarios WHERE region = ? OR ? IS NULL
+    ORDER BY 1
+"""
 # Opcion agregada del selector de Region -- pedido explicito del usuario para
 # comparar el pais entero en vez de una region a la vez. No es una region
 # real de dim_region: en vez de filtrar por r.nombre_region, las consultas de
@@ -172,7 +185,9 @@ def _modelo_en_memoria(ruta_parquet: str, version: float) -> duckdb.DuckDBPyConn
     datos nuevos y Streamlit Cloud hace pull, la siguiente sesion arma el
     modelo nuevo sola (antes, la conexion cacheada seguia leyendo el
     .duckdb viejo hasta que se reiniciara la app)."""
-    return construir_en_memoria(Path(ruta_parquet))
+    con = construir_dw_en_memoria(Path(ruta_parquet))
+    crear_macros_publicas(con)
+    return con
 
 
 def conectar() -> duckdb.DuckDBPyConnection:
@@ -253,7 +268,7 @@ if not RUTA_PARQUET.exists():
 con = conectar()
 
 opciones_region = [TODO_EL_PERU] + _opciones(
-    con, "SELECT nombre_region FROM dim_region ORDER BY nombre_region"
+    con, "SELECT DISTINCT region FROM publico.precios_mensuales ORDER BY 1"
 )
 if "region_seleccionada" not in st.session_state:
     # Lima por defecto (no la primera alfabetica, "Amazonas") -- es la region
@@ -395,30 +410,18 @@ RUTA_PRODUCTOS_DESTACADOS = Path(__file__).parent / "assets" / "productos"
 
 with st.sidebar.container(border=True):
     st.caption("Productos destacados")
-    if st.session_state["region_seleccionada"] == TODO_EL_PERU:
-        productos_de_la_region = con.execute(
-            "SELECT DISTINCT p.nombre_producto FROM fact_precios f "
-            "JOIN dim_producto p ON f.producto_id = p.producto_id ORDER BY 1"
-        ).df().iloc[:, 0].tolist()
-    else:
-        # ORDER BY: sin el, el orden de "SELECT DISTINCT" no esta garantizado
-        # -- para una palabra clave con varias coincidencias (ej. "papa" hace
-        # match con "Papa canchan", "Papa negra andina", etc.) el boton
-        # terminaba eligiendo una variedad distinta en cada rerun, sin que el
-        # usuario cambiara nada. Bug real encontrado 2026-09-09 verificando
-        # el modo "Todo el Peru" con Playwright: el mismo boton "Papa"
-        # aplicaba un producto diferente entre una corrida y la siguiente.
-        productos_de_la_region = con.execute(
-            """
-            SELECT DISTINCT p.nombre_producto
-            FROM fact_precios f
-            JOIN dim_producto p ON f.producto_id = p.producto_id
-            JOIN dim_region r ON f.region_id = r.region_id
-            WHERE r.nombre_region = ?
-            ORDER BY 1
-            """,
-            [st.session_state["region_seleccionada"]],
-        ).df().iloc[:, 0].tolist()
+    # None = todas las regiones ("Todo el Peru"). SQL_VARIEDADES ordena: sin
+    # ORDER BY el orden de un DISTINCT no esta garantizado, y para una palabra
+    # clave con varias coincidencias (ej. "papa" -> "Papa canchan", "Papa
+    # negra andina"...) el boton elegia una variedad distinta en cada rerun.
+    # Bug real encontrado 2026-09-09 verificando "Todo el Peru" con Playwright.
+    region_filtro = (
+        None if st.session_state["region_seleccionada"] == TODO_EL_PERU
+        else st.session_state["region_seleccionada"]
+    )
+    productos_de_la_region = con.execute(
+        SQL_VARIEDADES, [region_filtro] * 4
+    ).df().iloc[:, 0].tolist()
     columnas_destacados = st.columns(2)
     for indice, (archivo, etiqueta, palabra_clave) in enumerate(PRODUCTOS_DESTACADOS):
         with columnas_destacados[indice % 2]:
@@ -464,7 +467,9 @@ with st.sidebar.container(border=True):
 # crea, asi que sus campos terminarian ahi, no en la columna donde se llamo
 # "with formulario:").
 fecha_min, fecha_max = con.execute(
-    "SELECT MIN(fecha), MAX(fecha) FROM fact_precios WHERE precio IS NOT NULL"
+    "SELECT MIN(fecha), MAX(fecha) FROM serie_publica(?) "
+    "WHERE COALESCE(precio_min, precio_prom, precio_max) IS NOT NULL",
+    ["Promedio"],
 ).fetchone()
 
 with st.container(border=True):
@@ -480,23 +485,10 @@ with st.container(border=True):
             [1.8, 1.3, 1.1, 1.7, 1]
         )
         with col_producto:
-            if region == TODO_EL_PERU:
-                opciones_producto = con.execute(
-                    "SELECT DISTINCT p.nombre_producto FROM fact_precios f "
-                    "JOIN dim_producto p ON f.producto_id = p.producto_id ORDER BY 1"
-                ).df().iloc[:, 0].tolist()
-            else:
-                opciones_producto = con.execute(
-                    """
-                    SELECT DISTINCT p.nombre_producto
-                    FROM fact_precios f
-                    JOIN dim_producto p ON f.producto_id = p.producto_id
-                    JOIN dim_region r ON f.region_id = r.region_id
-                    WHERE r.nombre_region = ?
-                    ORDER BY 1
-                    """,
-                    [region],
-                ).df().iloc[:, 0].tolist()
+            filtro_productos = None if region == TODO_EL_PERU else region
+            opciones_producto = con.execute(
+                SQL_VARIEDADES, [filtro_productos] * 4
+            ).df().iloc[:, 0].tolist()
             # Bug real encontrado 2026-09-06: sin "key", este selectbox se
             # identifica (entre otras cosas) por su lista de opciones -- al
             # cambiar de Región, la lista cambia, Streamlit lo trata como un
@@ -519,7 +511,7 @@ with st.container(border=True):
         with col_mercado:
             tipo_mercado = st.radio(
                 "Tipo de mercado",
-                _opciones(con, "SELECT DISTINCT tipo_mercado FROM dim_variable ORDER BY 1"),
+                _opciones(con, "SELECT DISTINCT mercado FROM publico.precios_mensuales ORDER BY 1"),
                 horizontal=True,
             )
         with col_precio:
@@ -562,24 +554,16 @@ if region == TODO_EL_PERU:
     # equivalencia_kg) alcanza porque son atributos del producto, no de la
     # region -- deberian repetirse igual en todas las filas del grupo.
     df = con.execute(
-        """
-        SELECT f.fecha, f.periodicidad, AVG(f.precio / f.equivalencia_kg) AS precio,
-               ANY_VALUE(f.unidad) AS unidad, ANY_VALUE(f.equivalencia_kg) AS equivalencia_kg,
-               COUNT(DISTINCT f.region_id) AS num_regiones
-        FROM fact_precios f
-        JOIN dim_producto p ON f.producto_id = p.producto_id
-        JOIN dim_variable v ON f.variable_id = v.variable_id
-        WHERE p.nombre_producto = ?
-          AND v.tipo_mercado = ? AND v.tipo_precio = ?
-          AND f.fecha BETWEEN ? AND ?
-          AND f.precio IS NOT NULL
-        GROUP BY f.fecha, f.periodicidad
-        ORDER BY f.fecha, f.periodicidad
-        """,
-        [producto, tipo_mercado, tipo_precio, desde, hasta],
+        "SELECT fecha, periodicidad, AVG(precio_kg) AS precio, "
+        "ANY_VALUE(unidad) AS unidad, ANY_VALUE(equivalencia_kg) AS equivalencia_kg, "
+        "COUNT(DISTINCT region) AS num_regiones "
+        "FROM serie_publica(?) "
+        "WHERE variedad = ? AND mercado = ? AND fecha BETWEEN ? AND ? AND precio_kg IS NOT NULL "
+        "GROUP BY fecha, periodicidad ORDER BY fecha, periodicidad",
+        [tipo_precio, producto, tipo_mercado, desde, hasta],
     ).df()
     # Serie mensual: el promedio entre regiones del agregado mensual OFICIAL
-    # de cada una (ver warehouse.py, fact_precios_mensual) -- cada region
+    # de cada una (ver sisap.dw, fact_precio_mensual) -- cada region
     # aporta UN numero por mes. Sin el relleno con promedio diario: bug
     # real encontrado 2026-10-17, con el mes en curso todavia sin agregado,
     # el "octubre nacional" salia de solo las 3 regiones con dato diario y
@@ -587,48 +571,27 @@ if region == TODO_EL_PERU:
     # Minimo: "-10.3% vs. mes anterior", un artefacto de que regiones
     # entraban al promedio, no del precio).
     df_mensual = con.execute(
-        """
-        SELECT m.mes AS fecha, AVG(m.precio_kg) AS precio, COUNT(DISTINCT m.region_id) AS num_regiones
-        FROM fact_precios_mensual m
-        JOIN dim_producto p ON m.producto_id = p.producto_id
-        JOIN dim_variable v ON m.variable_id = v.variable_id
-        WHERE p.nombre_producto = ? AND v.tipo_mercado = ? AND v.tipo_precio = ?
-          AND m.fuente = 'mensual'
-          AND m.mes BETWEEN DATE_TRUNC('month', CAST(? AS DATE)) AND ?
-        GROUP BY m.mes
-        ORDER BY m.mes
-        """,
-        [producto, tipo_mercado, tipo_precio, desde, hasta],
+        "SELECT mes AS fecha, AVG(precio_kg) AS precio, COUNT(DISTINCT region) AS num_regiones "
+        "FROM mensual_publico(?) "
+        "WHERE variedad = ? AND mercado = ? AND fuente = 'mensual' AND precio_kg IS NOT NULL "
+        "AND mes BETWEEN DATE_TRUNC('month', CAST(? AS DATE)) AND ? "
+        "GROUP BY mes ORDER BY mes",
+        [tipo_precio, producto, tipo_mercado, desde, hasta],
     ).df()
 else:
     df = con.execute(
-        """
-        SELECT f.fecha, f.periodicidad, f.precio / f.equivalencia_kg AS precio, f.unidad, f.equivalencia_kg
-        FROM fact_precios f
-        JOIN dim_producto p ON f.producto_id = p.producto_id
-        JOIN dim_region r ON f.region_id = r.region_id
-        JOIN dim_variable v ON f.variable_id = v.variable_id
-        WHERE p.nombre_producto = ? AND r.nombre_region = ?
-          AND v.tipo_mercado = ? AND v.tipo_precio = ?
-          AND f.fecha BETWEEN ? AND ?
-          AND f.precio IS NOT NULL
-        ORDER BY f.fecha, f.periodicidad
-        """,
-        [producto, region, tipo_mercado, tipo_precio, desde, hasta],
+        "SELECT fecha, periodicidad, precio_kg AS precio, unidad, equivalencia_kg "
+        "FROM serie_publica(?) "
+        "WHERE variedad = ? AND region = ? AND mercado = ? AND fecha BETWEEN ? AND ? "
+        "AND precio_kg IS NOT NULL ORDER BY fecha, periodicidad",
+        [tipo_precio, producto, region, tipo_mercado, desde, hasta],
     ).df()
     df_mensual = con.execute(
-        """
-        SELECT m.mes AS fecha, m.precio_kg AS precio, m.fuente
-        FROM fact_precios_mensual m
-        JOIN dim_producto p ON m.producto_id = p.producto_id
-        JOIN dim_region r ON m.region_id = r.region_id
-        JOIN dim_variable v ON m.variable_id = v.variable_id
-        WHERE p.nombre_producto = ? AND r.nombre_region = ?
-          AND v.tipo_mercado = ? AND v.tipo_precio = ?
-          AND m.mes BETWEEN DATE_TRUNC('month', CAST(? AS DATE)) AND ?
-        ORDER BY m.mes
-        """,
-        [producto, region, tipo_mercado, tipo_precio, desde, hasta],
+        "SELECT mes AS fecha, precio_kg AS precio, fuente "
+        "FROM mensual_publico(?) "
+        "WHERE variedad = ? AND region = ? AND mercado = ? AND precio_kg IS NOT NULL "
+        "AND mes BETWEEN DATE_TRUNC('month', CAST(? AS DATE)) AND ? ORDER BY mes",
+        [tipo_precio, producto, region, tipo_mercado, desde, hasta],
     ).df()
 
 st.title(_md(producto))
@@ -805,7 +768,7 @@ UMBRAL_HUECO_DIAS = 45
 # continuos. Ancorar todo al dia 1 evita el desfasaje -- no cambia el
 # hover (que ya solo muestra mes y año, no el dia).
 #
-# Desde 2026-10-17 este agregado lo arma warehouse.py (fact_precios_mensual,
+# Desde 2026-10-17 este agregado lo arma el data warehouse (fact_precio_mensual,
 # ya fechado el dia 1): el agregado OFICIAL de SISAP cuando existe, y el
 # promedio de los dias solo para los meses que todavia no lo tienen. Antes
 # se promediaba aca el agregado del dia 1 junto con los ~30 dias del mes.
@@ -886,9 +849,7 @@ with st.container(border=True):
 # mensual graficado como si fuera el precio de ese dia.
 regiones_con_diario = _opciones(
     con,
-    "SELECT DISTINCT r.nombre_region FROM fact_precios f "
-    "JOIN dim_region r ON f.region_id = r.region_id "
-    "WHERE f.periodicidad = 'dia' ORDER BY 1",
+    "SELECT DISTINCT region FROM publico.precios_diarios ORDER BY 1",
 )
 texto_regiones_diarias = (
     ", ".join(regiones_con_diario[:-1]) + f" y {regiones_con_diario[-1]}"
@@ -945,20 +906,14 @@ with st.container(border=True):
 # con 3 barras. El fix fue que cada region use SU PROPIA fecha mas reciente.
 #
 # Desde 2026-10-17 se compara el ULTIMO MES de cada region (de
-# fact_precios_mensual), no su ultima fila: antes la barra de Lima era el
+# fact_precio_mensual), no su ultima fila: antes la barra de Lima era el
 # precio de un dia suelto y la de Puno el promedio de un mes entero.
 comparacion = con.execute(
-    """
-    SELECT r.nombre_region, m.precio_kg AS precio, m.mes
-    FROM fact_precios_mensual m
-    JOIN dim_producto p ON m.producto_id = p.producto_id
-    JOIN dim_region r ON m.region_id = r.region_id
-    JOIN dim_variable v ON m.variable_id = v.variable_id
-    WHERE p.nombre_producto = ? AND v.tipo_mercado = ? AND v.tipo_precio = ?
-    QUALIFY m.mes = MAX(m.mes) OVER (PARTITION BY r.nombre_region)
-    ORDER BY m.precio_kg DESC
-    """,
-    [producto, tipo_mercado, tipo_precio],
+    "SELECT region AS nombre_region, precio_kg AS precio, mes "
+    "FROM mensual_publico(?) "
+    "WHERE variedad = ? AND mercado = ? AND precio_kg IS NOT NULL "
+    "QUALIFY mes = MAX(mes) OVER (PARTITION BY region) ORDER BY precio_kg DESC",
+    [tipo_precio, producto, tipo_mercado],
 ).df()
 
 with st.container(border=True):
