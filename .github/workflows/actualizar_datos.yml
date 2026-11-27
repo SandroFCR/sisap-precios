@@ -76,6 +76,17 @@ jobs:
         # pueda construir (integridad referencial) antes de publicar
         run: python -m sisap.cli construir-dwh
 
+      - name: Cargar y validar el data warehouse dimensional
+        # El DW del curso (hechos diario/mensual, jerarquias y auditoria).
+        # Corre las verificaciones del contrato de datos y las 8 validaciones
+        # posteriores a la carga dentro de una transaccion: si la fuente trae
+        # algo fuera de contrato, la carga se revierte y este paso falla ANTES
+        # de comitear, igual que el de arriba. El archivo que genera
+        # (data/processed/sisap_dw.duckdb) esta en .gitignore y el commit de
+        # abajo agrega solo precios.parquet por ruta explicita, asi que nunca
+        # entra al repo.
+        run: python -m sisap.cli construir-dw
+
       - name: Comitear los datos actualizados
         shell: bash
         run: |
